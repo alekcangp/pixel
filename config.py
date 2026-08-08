@@ -20,6 +20,10 @@ DEFAULT_EXCLUDE_DIRS = [
     ".gradle", ".m2", ".npm", ".yarn", ".cargo", ".rustup",
     "Program Files", "ProgramData", "Program Files (x86)", "Windows", "System32",
     "Temp", "tmp", "Trash", ".Trash", "Library", "Application Support", "Games",
+    # macOS служебные папки
+    ".DS_Store", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100",
+    ".TemporaryItems", ".VolumeIcon.icns", ".com.apple.timemachine.donotpresent",
+    "Photos Library.photoslibrary", "Mobile Documents", ".Trashes",
 ]
 
 # Дедупликация
@@ -34,9 +38,6 @@ EMBED_IMAGE_SIZE = 224
 # Кластеризация
 CLUSTER_MIN_CLUSTERS = 2
 CLUSTER_RANDOM_STATE = 42
-
-# Auto-naming clusters: minimum cosine-similarity margin
-AUTO_NAME_MARGIN_THRESHOLD = 0.15
 
 
 # UMAP параметры для снижения размерности

@@ -4,6 +4,8 @@ import os
 import shutil
 import sys
 import time
+import tkinter as tk
+from tkinter import filedialog
 from pathlib import Path
 from PIL import Image as PILImage
 import config
@@ -29,6 +31,7 @@ def _format_size(size_bytes: int) -> str:
 class ImageDedupApp:
     def __init__(self, page: ft.Page):
         self.page = page
+
         self.page.title = "Image Deduplication"
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.window_width = 1200
@@ -60,6 +63,9 @@ class ImageDedupApp:
         self._cached_path_to_cluster = None
         self._cached_path_to_cluster_scope = None
         
+        # Flet FilePicker removed - using tkinter fallback for folder selection
+        # (Flet 0.86.5 FilePicker has runtime issues on desktop)
+        
         # Создаём UI
         self.create_layout()
         
@@ -87,8 +93,27 @@ class ImageDedupApp:
         self._preview_path_text = None
         self._preview_counter_text = None
         
+        # Состояние модального диалога сброса
+        self._reset_dialog = None
+        
         # Глобальные клавиатурные сокращения для превью
         self.page.on_keyboard_event = self._on_preview_keyboard
+    
+    def _pick_folder(self, title: str) -> str | None:
+        """Открывает нативный диалог выбора папки через tkinter."""
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title=title)
+        root.destroy()
+        return path if path else None
+    
+    def browse_scan_path(self, e):
+        """Открыть нативный проводник для выбора пути сканирования."""
+        path = self._pick_folder("Выберите папку для сканирования")
+        if path is not None:
+            self.scan_path_input.value = path
+            self.page.update()
     
     def create_layout(self):
         """Создание основного layout"""
@@ -308,10 +333,18 @@ class ImageDedupApp:
             on_click=self.toggle_scan,
         )
         
+        self.reset_button = ft.ElevatedButton(
+            "Сброс",
+            icon=ft.Icons.DELETE_FOREVER,
+            bgcolor=ft.Colors.ERROR,
+            color=ft.Colors.ON_ERROR,
+            on_click=self._show_reset_dialog,
+        )
+        
         return ft.Column(
             [
                 ft.Row(
-                    [self.scan_path_input, browse_scan_path_button, self.scan_button],
+                    [self.scan_path_input, browse_scan_path_button, self.scan_button, self.reset_button],
                     spacing=10,
                 ),
             ],
@@ -690,27 +723,10 @@ class ImageDedupApp:
             self.progress_container.visible = False
             self.page.update()
     
-    async def browse_scan_path(self, e):
-        """Открыть проводник для выбора пути сканирования"""
-        def get_directory_path():
-            import tkinter as tk
-            from tkinter import filedialog
-            
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes('-topmost', True)
-            
-            folder_path = filedialog.askdirectory(
-                title="Выберите папку для сканирования",
-                initialdir="/"
-            )
-            
-            root.destroy()
-            return folder_path
-        
-        # Запускаем в отдельном потоке, чтобы не блокировать UI
-        path = await asyncio.to_thread(get_directory_path)
-        if path:
+    def browse_scan_path(self, e):
+        """Открыть нативный проводник для выбора пути сканирования."""
+        path = self._pick_folder("Выберите папку для сканирования")
+        if path is not None:
             self.scan_path_input.value = path
             self.page.update()
     
@@ -722,6 +738,79 @@ class ImageDedupApp:
         )
         self.page.snack_bar.open = True
         self.page.update()
+    
+    def _show_reset_dialog(self, e):
+        """Показать диалог подтверждения сброса"""
+        if self._reset_dialog is None:
+            self._reset_dialog = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Подтверждение сброса"),
+                content=ft.Text("Это удалит всю базу данных и кэш. Продолжить?"),
+                actions=[
+                    ft.TextButton("Отмена", on_click=lambda e: self._dismiss_reset_dialog()),
+                    ft.TextButton("Сбросить", on_click=self._on_reset_confirm),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        
+        if self._reset_dialog not in self.page.overlay:
+            self.page.overlay.append(self._reset_dialog)
+        self._reset_dialog.open = True
+        self.page.update()
+    
+    def _dismiss_reset_dialog(self):
+        """Закрыть диалог сброса"""
+        if self._reset_dialog is not None:
+            self._reset_dialog.open = False
+            self.page.update()
+    
+    async def _on_reset_confirm(self, e):
+        """Обработчик подтверждения сброса"""
+        self._dismiss_reset_dialog()
+        await self._do_reset()
+    
+    async def _do_reset(self):
+        """Полный сброс базы данных, кэша и состояния приложения"""
+        if self.scanning:
+            self.scanning = False
+            scanner.STOP_REQUESTED = True
+            self.scan_button.text = "Сканировать"
+            self.scan_button.icon = ft.Icons.SEARCH
+            self.scan_button.bgcolor = ft.Colors.PRIMARY
+            self.progress_bar.visible = False
+            self.progress_text.visible = False
+            self.progress_container.visible = False
+        
+        database.clear_all()
+        thumbnail_cache.clear()
+        search.clear_cache()
+        
+        self.images = []
+        self.clusters = {}
+        self.cluster_names = {}
+        self.search_results = []
+        self.selected_images = set()
+        self.current_gallery_paths = []
+        self.current_gallery_scope = "overview"
+        self.current_tab = -1
+        self.active_cluster_id = None
+        self._invalidate_cluster_cache()
+        
+        self.scan_path_input.value = "Все диски"
+        
+        self.stat_total.value = "0"
+        self.stat_total_size.value = "0 Б"
+        self.stat_duplicates.value = "0"
+        self.stat_duplicates_size.value = "0 Б"
+        self.stat_unique.value = "0"
+        self.stat_unique_size.value = "0 Б"
+        
+        self.update_clusters_list()
+        
+        self.tab_content.content = ft.Text("Категории ещё не созданы. Запустите полный цикл.")
+        
+        self.page.update()
+        self.show_snackbar("Сброс выполнен. База и кэш очищены.", ft.Colors.GREEN)
     
     def switch_tab(self, index: int):
         """Переключение вкладки"""
@@ -1933,31 +2022,11 @@ class ImageDedupApp:
         self.page.update()
     
     def browse_destination_folder(self, text_field: ft.TextField):
-        """Открыть проводник для выбора папки назначения"""
-        async def pick_folder():
-            def get_directory_path():
-                import tkinter as tk
-                from tkinter import filedialog
-                
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes('-topmost', True)
-                
-                folder_path = filedialog.askdirectory(
-                    title="Выберите папку назначения",
-                    initialdir=text_field.value or "/"
-                )
-                
-                root.destroy()
-                return folder_path
-            
-            # Запускаем в отдельном потоке
-            path = await asyncio.to_thread(get_directory_path)
-            if path:
-                text_field.value = path
-                self.page.update()
-        
-        asyncio.create_task(pick_folder())
+        """Открыть нативный проводник для выбора папки назначения."""
+        path = self._pick_folder("Выберите папку назначения")
+        if path is not None:
+            text_field.value = path
+            self.page.update()
 
     def toggle_select_all(self, paths: list):
         """Переключатель: если все выбраны - снимает все, иначе выбирает все"""

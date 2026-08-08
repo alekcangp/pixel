@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 import config
-from core.clusterer import load_embeddings
+from core.clustererhdb import load_embeddings
 from core.dedup import LSHIndex, compute_phash
 from core.embedder import get_embedder
 from core.scanner import load_index
@@ -110,6 +110,17 @@ _cache = {
     "paths": None,
     "index": None,
 }
+
+
+def clear_cache():
+    """Сбрасывает кэш эмбеддингов и FAISS-индекса.
+
+    Должен вызываться после пересчёта эмбеддингов (embedder.run), иначе
+    текстовый поиск будет возвращать результаты на основе устаревших данных.
+    """
+    _cache["embeddings"] = None
+    _cache["paths"] = None
+    _cache["index"] = None
 
 
 def build_index(embeddings):

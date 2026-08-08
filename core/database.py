@@ -36,6 +36,7 @@ def _to_unsigned(val):
 def _get_conn():
     """Открывает соединение и гарантирует, что схема создана."""
     global _initialized
+    os.makedirs(os.path.dirname(config.DB_FILE), exist_ok=True)
     conn = sqlite3.connect(config.DB_FILE)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -436,7 +437,6 @@ def save_garbage(paths):
     Args:
         paths: list[str] — пути файлов, подтверждённых как визуальный мусор.
     """
-    import config
     conn = _get_conn()
     try:
         rows = []
@@ -618,7 +618,6 @@ def clear_all():
 
 def load_db_stats():
     """Возвращает статистику: total, duplicates, unique, clusters, garbage, total_size."""
-    import config
     conn = _get_conn()
     try:
         total = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]

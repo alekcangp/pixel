@@ -93,6 +93,11 @@ class SiglipEmbedder:
                 continue
 
             batch_embeddings = []
+            # Пути, для которых реально получены эмбеддинги в этом батче.
+            # ВАЖНО: в fallback-режиме не все batch_valid могут быть успешно
+            # обработаны, поэтому нельзя передавать batch_valid целиком —
+            # иначе пути будут сопоставлены с чужими эмбеддингами.
+            batch_embedded_paths = []
             try:
                 # SigLIP2 — мультимодальная модель: используем непустой текст-заглушку.
                 inputs = self.processor(
@@ -105,6 +110,7 @@ class SiglipEmbedder:
                     outputs = self.model(**inputs)
                 emb = outputs.image_embeds.cpu().numpy()
                 batch_embeddings.append(emb)
+                batch_embedded_paths.extend(batch_valid)
                 embeddings.append(emb)
                 valid_paths.extend(batch_valid)
             except Exception as e:
@@ -123,6 +129,7 @@ class SiglipEmbedder:
                             outputs = self.model(**inputs)
                         emb = outputs.image_embeds.cpu().numpy()
                         batch_embeddings.append(emb)
+                        batch_embedded_paths.append(p)
                         embeddings.append(emb)
                         valid_paths.append(p)
                     except Exception:
@@ -131,7 +138,7 @@ class SiglipEmbedder:
             # Сохраняем обработанный батч в БД сразу (для устойчивости к прерыванию)
             if batch_embeddings and batch_save_callback is not None:
                 try:
-                    batch_save_callback(np.vstack(batch_embeddings), batch_valid)
+                    batch_save_callback(np.vstack(batch_embeddings), batch_embedded_paths)
                 except Exception as e:
                     print("\nОшибка сохранения батча в БД: %s" % e)
 
@@ -297,4 +304,13 @@ def run(progress_callback=None, incremental=True):
         print(f"  {p}")
 
     print(f"\nЭмбеддинги сохранены в БД: {config.DB_FILE}")
+
+    # Эмбеддинги изменились — сбрасываем кэш семантического поиска,
+    # иначе текстовый поиск будет использовать устаревшие данные.
+    try:
+        from core import search
+        search.clear_cache()
+    except Exception:
+        pass
+
     return embeddings, valid_paths

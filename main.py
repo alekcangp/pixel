@@ -63,11 +63,6 @@ def cmd_embed(args):
     embedder.run(incremental=not args.full)
 
 
-def cmd_cluster(args):
-    from core import clusterer
-    clusterer.run()
-
-
 def cmd_cluster_hdb(args):
     from core import clustererhdb
     clustererhdb.run()
@@ -142,9 +137,6 @@ def main():
     p_embed.add_argument("--full", action="store_true",
                          help="Полный пересчёт (вместо инкрементального)")
     p_embed.set_defaults(func=cmd_embed)
-
-    p_cluster = sub.add_parser("cluster", help="Кластеризация (MiniBatchKMeans)")
-    p_cluster.set_defaults(func=cmd_cluster)
 
     p_cluster_hdb = sub.add_parser("cluster-hdb", help="Кластеризация (HDBSCAN + UMAP)")
     p_cluster_hdb.set_defaults(func=cmd_cluster_hdb)

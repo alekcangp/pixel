@@ -11,6 +11,7 @@
 import os
 import sys
 import shutil
+import threading
 import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,8 +30,29 @@ from core.scanner import load_index
 # Загрузка изображения
 # ============================================================
 
+# OpenCV пишет предупреждения (например, про анимированные WebP/GIF) в stderr.
+# Подавление через os.dup2 на глобальном fd 2 НЕ потокобезопасно: при
+# параллельной дедупликации (ThreadPoolExecutor) несколько потоков могут
+# гоняться за fd 2, что приводит к повреждению stderr или падению процесса.
+# Поэтому переключение fd защищаем блокировкой. Чтобы не сериализовать
+# декодирование всех изображений, блокировку берём только для форматов,
+# которые реально генерируют предупреждения (анимированные WebP/GIF).
+_cv_stderr_lock = threading.Lock()
+
+# Расширения, при декодировании которых OpenCV может писать в stderr.
+_WARNING_EXTENSIONS = {".webp", ".gif"}
+
+
+def _needs_stderr_suppression(path):
+    """Возвращает True, если формат файла может генерировать предупреждения OpenCV."""
+    return os.path.splitext(path)[1].lower() in _WARNING_EXTENSIONS
+
+
 def _suppress_cv_stderr():
-    """Временно подавляет stderr OpenCV (сообщения об анимированных WebP/GIF)."""
+    """Временно подавляет stderr OpenCV (сообщения об анимированных WebP/GIF).
+
+    Должен вызываться только при удержании _cv_stderr_lock.
+    """
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
     orig_stderr_fd = os.dup(2)
     os.dup2(devnull_fd, 2)
@@ -38,7 +60,10 @@ def _suppress_cv_stderr():
 
 
 def _restore_cv_stderr(orig_stderr_fd, devnull_fd):
-    """Восстанавливает stderr после _suppress_cv_stderr."""
+    """Восстанавливает stderr после _suppress_cv_stderr.
+
+    Должен вызываться только при удержании _cv_stderr_lock.
+    """
     os.dup2(orig_stderr_fd, 2)
     os.close(orig_stderr_fd)
     os.close(devnull_fd)
@@ -54,11 +79,19 @@ def load_image_cv(path):
         data = np.fromfile(path, dtype=np.uint8)
         if data.size == 0:
             return None
-        orig_fd, null_fd = _suppress_cv_stderr()
-        try:
+        if _needs_stderr_suppression(path):
+            # Форматы, которые могут писать в stderr: сериализуем декодирование
+            # через блокировку, чтобы не гоняться за глобальным fd 2.
+            with _cv_stderr_lock:
+                orig_fd, null_fd = _suppress_cv_stderr()
+                try:
+                    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+                finally:
+                    _restore_cv_stderr(orig_fd, null_fd)
+        else:
+            # Обычные форматы (JPEG/PNG и т.п.) не пишут в stderr —
+            # декодируем без блокировки, сохраняя параллелизм.
             img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        finally:
-            _restore_cv_stderr(orig_fd, null_fd)
         return img
     except Exception:
         return None

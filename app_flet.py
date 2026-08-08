@@ -66,7 +66,7 @@ class ImageDedupApp:
         self.load_stats()
         
         # Показываем первый кластер по умолчанию
-        self.show_clusters_tab()
+        asyncio.create_task(self.show_clusters_tab())
         
         # Фоновая загрузка модели
         asyncio.create_task(self.preload_model())
@@ -232,7 +232,7 @@ class ImageDedupApp:
         self._save_current_gallery_scroll()
         self.active_cluster_id = cluster_id
         self.current_tab = -1
-        self.show_clusters_tab()
+        asyncio.create_task(self.show_clusters_tab())
         # Обновляем подсветку кнопок
         self.update_clusters_list()
     
@@ -263,11 +263,11 @@ class ImageDedupApp:
         
         # Пересоздаём текущую вкладку
         if current_tab == -1:
-            self.show_clusters_tab()
+            asyncio.create_task(self.show_clusters_tab())
         elif current_tab == 0:
             self.show_search_tab()
         elif current_tab == 1:
-            self.show_export_tab()
+            asyncio.create_task(self.show_export_tab())
     
     def create_scan_section(self):
         """Секция сканирования"""
@@ -461,7 +461,7 @@ class ImageDedupApp:
                                 current_lazy = int(current_lazy)
                                 if current_lazy >= saved_lazy or current_lazy >= len(paths):
                                     break
-                                self.load_more(paths, scope, gallery)
+                                await self.load_more(paths, scope, gallery)
                                 await asyncio.sleep(0.05)
                     
                     # Пробуем несколько раз с задержкой, чтобы галерея успела отрисоваться
@@ -636,7 +636,11 @@ class ImageDedupApp:
             self.page.update()
             
             result = await asyncio.to_thread(embedder.run, incremental=True, progress_callback=self._progress_callback)
-            
+
+            # Эмбеддинги могли измениться — сбрасываем кэш семантического поиска,
+            # чтобы последующие запросы использовали свежие данные.
+            search.clear_cache()
+
             if scanner.STOP_REQUESTED:
                 return
             
@@ -712,7 +716,7 @@ class ImageDedupApp:
         if index == 0:
             self.show_search_tab()
         elif index == 1:
-            self.show_export_tab()
+            asyncio.create_task(self.show_export_tab())
     
     def get_selection_state(self, paths: list) -> str:
         """Определить состояние выделения для иконки чекбокса.
@@ -742,7 +746,7 @@ class ImageDedupApp:
         else:  # partial
             return ft.Icons.INDETERMINATE_CHECK_BOX
     
-    def show_export_tab(self):
+    async def show_export_tab(self):
         """Показать вкладку 'Экспорт' — выбранные файлы в галерее + статистика"""
         # Выбранные файлы (только существующие)
         selected_paths = [p for p in self.selected_images if os.path.exists(p)]
@@ -821,7 +825,14 @@ class ImageDedupApp:
         
         # Галерея выбранных файлов
         if selected_paths:
-            gallery = self.create_gallery(selected_paths, "export")
+            # Показываем индикатор загрузки пока генерируются миниатюры
+            self.tab_content.content = ft.Column(
+                [stats_row, ft.Divider(), controls_row, ft.Divider(), ft.ProgressRing()],
+                expand=True,
+            )
+            self.page.update()
+            
+            gallery = await self.create_gallery(selected_paths, "export")
             content = ft.Column(
                 [stats_row, ft.Divider(), controls_row, ft.Divider(), gallery],
                 expand=True,
@@ -904,7 +915,7 @@ class ImageDedupApp:
         
         self.show_snackbar(f"Скопировано {total_copied} файлов в {dest_path}", ft.Colors.GREEN)
 
-    def show_clusters_tab(self):
+    async def show_clusters_tab(self):
         """Показать вкладку 'Категории'"""
         if not self.clusters:
             self.tab_content.content = ft.Text("Категории ещё не созданы. Запустите полный цикл.")
@@ -951,8 +962,15 @@ class ImageDedupApp:
         self.current_gallery_paths = members
         self.current_gallery_scope = f"cluster_{cluster_id}"
         
-        # Галерея
-        gallery = self.create_gallery(members, f"cluster_{cluster_id}")
+        # Показываем индикатор загрузки пока генерируются миниатюры
+        self.tab_content.content = ft.Column(
+            [controls_row, ft.Divider(), ft.ProgressRing()],
+            expand=True,
+        )
+        self.page.update()
+        
+        # Галерея (генерация миниатюр в фоновом потоке)
+        gallery = await self.create_gallery(members, f"cluster_{cluster_id}")
         
         self.tab_content.content = ft.Column(
             [controls_row, ft.Divider(), gallery],
@@ -1033,7 +1051,7 @@ class ImageDedupApp:
                 paths.sort()
                 self.search_result_paths = paths
                 self.current_gallery_paths = paths
-                gallery = self.create_gallery(paths, "search_results")
+                gallery = await self.create_gallery(paths, "search_results")
                 
                 self.search_results_container.controls = [
                     ft.Text(f"Найдено: {len(results)}", size=14),
@@ -1083,12 +1101,13 @@ class ImageDedupApp:
         self._cached_path_to_cluster = None
         self._cached_path_to_cluster_scope = None
 
-    def _make_gallery_item(self, path: str, scope: str, gallery: ft.GridView, path_to_cluster: dict = None):
+    def _make_gallery_item(self, path: str, scope: str, gallery: ft.GridView, path_to_cluster: dict = None, thumb_path: str = None):
         """Создаёт элемент галереи (изображение + бейдж категории для поиска)."""
         is_selected = path in self.selected_images
         
-        # Пробуем получить thumbnail из кэша (возвращает путь к временному файлу)
-        thumb_path = thumbnail_cache.get_thumbnail(path, size=150)
+        # Используем предварительно сгенерированную миниатюру, либо генерируем на лету
+        if thumb_path is None:
+            thumb_path = thumbnail_cache.get_thumbnail(path, size=150)
         if thumb_path is not None:
             image = ft.Image(
                 src=thumb_path,
@@ -1157,8 +1176,41 @@ class ImageDedupApp:
             on_secondary_tap=on_secondary_tap,
         )
 
-    def create_gallery(self, paths: list, scope: str):
-        """Создание галереи с lazy loading"""
+    async def _generate_thumbnails_parallel(self, paths: list, size: int = 150, max_workers: int = 4) -> dict:
+        """Пакетная генерация миниатюр с параллельными потоками.
+
+        Использует asyncio.Semaphore для ограничения числа одновременных
+        потоков, чтобы не перегружать CPU при генерации.
+        """
+        semaphore = asyncio.Semaphore(max_workers)
+
+        async def generate_one(path):
+            async with semaphore:
+                return path, await asyncio.to_thread(thumbnail_cache.get_thumbnail, path, size)
+
+        results = await asyncio.gather(*[generate_one(p) for p in paths])
+        return dict(results)
+
+    def _generate_thumbnails_batch(self, paths: list, size: int = 150) -> dict:
+        """Пакетная генерация миниатюр для списка путей.
+        
+        Предназначен для выполнения в фоновом потоке через asyncio.to_thread,
+        чтобы не блокировать UI-поток при создании галереи.
+        
+        Returns:
+            dict {path: thumb_path_or_None}
+        """
+        result = {}
+        for path in paths:
+            result[path] = thumbnail_cache.get_thumbnail(path, size=size)
+        return result
+
+    async def create_gallery(self, paths: list, scope: str):
+        """Создание галереи с lazy loading.
+        
+        Генерация миниатюр выполняется в фоновом потоке через asyncio.to_thread,
+        чтобы не блокировать UI при переключении категорий.
+        """
         # Validate paths
         if not paths or not isinstance(paths, list):
             return ft.Column([ft.Text("Нет изображений")])
@@ -1184,16 +1236,20 @@ class ImageDedupApp:
         # Для обзора используем меньший page_size для производительности
         if scope == "overview":
             page_size = 20
+        elif scope.startswith("cluster_"):
+            page_size = 40
         else:
-            page_size = 100
+            page_size = 60
         
         try:
             page_paths = paths[offset:offset + page_size]
         except (TypeError, ValueError):
-            page_size = 20 if scope == "overview" else 100
+            page_size = 20 if scope == "overview" else (40 if scope.startswith("cluster_") else 60)
             page_paths = paths[:page_size]
             offset = 0
         
+        # Генерируем миниатюры параллельно в фоновом режиме, чтобы не блокировать UI
+        thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=4)
         
         # Создаём GridView
         gallery = ft.GridView(
@@ -1206,10 +1262,10 @@ class ImageDedupApp:
             on_scroll=self.create_scroll_handler(paths, scope, page_size),
         )
         
-        # Добавляем изображения
+        # Добавляем изображения (минимальная работа в UI-потоке — только создание контролов)
         for path in page_paths:
             gallery.controls.append(
-                self._make_gallery_item(path, scope, gallery, path_to_cluster)
+                self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path))
             )
         
         return gallery
@@ -1283,7 +1339,7 @@ class ImageDedupApp:
                 
                 if should_load:
                     setattr(self.page.session, last_loaded_key, offset_int + page_size)
-                    self.load_more(paths, scope, e.control)
+                    asyncio.create_task(self.load_more(paths, scope, e.control))
                     
             except Exception as ex:
                 # Log error for debugging
@@ -1293,8 +1349,12 @@ class ImageDedupApp:
         
         return on_scroll
     
-    def load_more(self, paths: list, scope: str, gallery: ft.GridView):
-        """Загрузка следующей порции (Infinite Scroll)"""
+    async def load_more(self, paths: list, scope: str, gallery: ft.GridView):
+        """Загрузка следующей порции (Infinite Scroll).
+        
+        Генерация миниатюр выполняется в фоновом потоке через asyncio.to_thread,
+        чтобы не блокировать UI при прокрутке.
+        """
         try:
             # Validate inputs
             if not paths or not isinstance(paths, list):
@@ -1305,8 +1365,10 @@ class ImageDedupApp:
             # Используем тот же page_size что и в create_gallery
             if scope == "overview":
                 page_size = 20
+            elif scope.startswith("cluster_"):
+                page_size = 40
             else:
-                page_size = 100
+                page_size = 60
             
             session_key = f"gallery_offset_{scope}"
             offset = getattr(self.page.session, session_key, 0)
@@ -1327,10 +1389,13 @@ class ImageDedupApp:
             # Для поиска и экспорта строим map path -> cluster_id
             path_to_cluster = self._get_path_to_cluster_map() if scope in ("search_results", "export") else None
             
-            # Добавляем новые изображения
+            # Генерируем миниатюры параллельно в фоновом режиме
+            thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=4)
+            
+            # Добавляем новые изображения (минимальная работа в UI-потоке)
             for path in page_paths:
                 gallery.controls.append(
-                    self._make_gallery_item(path, scope, gallery, path_to_cluster)
+                    self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path))
                 )
             
             setattr(self.page.session, f"gallery_offset_{scope}", new_offset)
@@ -1399,11 +1464,11 @@ class ImageDedupApp:
         
         # Обновляем текущую вкладку
         if self.current_tab == -1:
-            self.show_clusters_tab()
+            asyncio.create_task(self.show_clusters_tab())
         elif self.current_tab == 0:
             self.show_search_tab()
         elif self.current_tab == 1:
-            self.show_export_tab()
+            asyncio.create_task(self.show_export_tab())
     
     def show_preview(self, path: str):
         """Показать preview изображения с зумом, навигацией и полным путём."""
@@ -1527,7 +1592,9 @@ class ImageDedupApp:
             modal=True,
         )
         
-        self.page.open(dialog)
+        self.page.overlay.append(dialog)
+        dialog.open = True
+        self.page.update()
     
     def show_context_menu(self, path: str, local_position=None):
         """Показать контекстное меню при правом клике на изображение"""

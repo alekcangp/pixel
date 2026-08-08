@@ -1,18 +1,6 @@
-"""Кэш миниатюр для галереи.
-
-Хранит сгенерированные thumbnail в памяти, инвалидирует по ключу:
-  path + mtime + size
-
-Это позволяет:
-- не пересоздавать thumbnail при каждом rerun UI;
-- корректно инвалидировать кэш при изменении файла;
-- не зависеть от путей как единственного ключа.
-"""
-
 import hashlib
 import os
 import tempfile
-from pathlib import Path
 from typing import Optional
 
 from PIL import Image, ImageOps
@@ -21,6 +9,10 @@ from PIL import Image, ImageOps
 # Глобальный кэш: {cache_key: temp_file_path}
 _cache: dict[str, str] = {}
 
+# Обратный индекс: {path: set(cache_key)} — позволяет инвалидировать
+# записи по пути независимо от mtime/size (ключ кэша включает их).
+_path_keys: dict[str, set[str]] = {}
+
 
 def _make_cache_key(path: str, mtime: float, size: int) -> str:
     """Создаёт ключ кэша из пути, mtime и размера."""
@@ -28,17 +20,28 @@ def _make_cache_key(path: str, mtime: float, size: int) -> str:
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _remove_key(key: str) -> None:
+    """Удаляет запись кэша по ключу и освобождает временный файл."""
+    temp_path = _cache.pop(key, None)
+    if temp_path and os.path.exists(temp_path):
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+
 def invalidate(path: str) -> None:
-    """Удаляет thumbnail из кэша, если он там есть."""
-    prefix = hashlib.sha256(path.encode("utf-8", errors="replace")).hexdigest()
-    for key in list(_cache.keys()):
-        if key.startswith(prefix):
-            temp_path = _cache.pop(key, None)
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
+    """Удаляет thumbnail из кэша, если он там есть.
+
+    Ключи кэша — SHA256(path + mtime + size), поэтому инвалидация по пути
+    выполняется через обратный индекс _path_keys, а не по префиксу хэша.
+    """
+    keys = _path_keys.pop(path, None)
+    if not keys:
+        return
+    for key in list(keys):
+        _remove_key(key)
+        keys.discard(key)
 
 
 def clear() -> None:
@@ -50,6 +53,7 @@ def clear() -> None:
             except Exception:
                 pass
     _cache.clear()
+    _path_keys.clear()
 
 
 def get_thumbnail(
@@ -94,6 +98,8 @@ def get_thumbnail(
                 except Exception:
                     pass
             _cache[cache_key] = temp_path
+            # Регистрируем путь в обратном индексе для корректной инвалидации
+            _path_keys.setdefault(path, set()).add(cache_key)
         return temp_path
     except Exception:
         return None

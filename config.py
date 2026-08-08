@@ -3,7 +3,6 @@ import os
 # Пути
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
-os.makedirs(STORAGE_DIR, exist_ok=True)
 
 # База данных SQLite (вместо отдельных JSON/npy-файлов)
 DB_FILE = os.path.join(STORAGE_DIR, "images.db")

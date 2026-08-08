@@ -366,10 +366,19 @@ def cluster(embeddings, progress_callback=None):
     # Для очень маленьких датасетов fallback на KMeans
     if n_samples < 20:
         print(f"Мало данных ({n_samples}), используем KMeans fallback")
-        from core.clusterer import cluster as kmeans_cluster
+        from sklearn.cluster import MiniBatchKMeans
+        n_clusters = min(n_samples, config.CLUSTER_MIN_CLUSTERS)
+        n_clusters = max(1, n_clusters)
+        emb = _l2_normalize(embeddings)
+        km = MiniBatchKMeans(
+            n_clusters=n_clusters,
+            random_state=config.CLUSTER_RANDOM_STATE,
+            batch_size=256,
+        )
+        labels = km.fit_predict(emb)
         if progress_callback:
             progress_callback("cluster", 1, n_samples, "Мало данных, используем KMeans")
-        return kmeans_cluster(embeddings)
+        return labels
     
     # Шаг 1: L2 нормализация
     if progress_callback:

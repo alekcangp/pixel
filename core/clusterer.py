@@ -43,7 +43,8 @@ CATEGORY_ENGLISH = {
 
 
 def load_embeddings():
-    return database.load_embeddings()
+    """Загружает эмбеддинги только для канонических (не дублирующихся) изображений."""
+    return database.load_embeddings(exclude_duplicates=True)
 
 
 def _l2_normalize(embeddings):
@@ -210,12 +211,10 @@ def _auto_name_clusters_via_logits(clusters, paths, max_samples_per_cluster=5):
 
         # Загружаем изображения
         images = []
-        valid_paths = []
         for p in sample_paths:
             try:
                 img = embedder._load_image(p)
                 images.append(img)
-                valid_paths.append(p)
             except Exception:
                 continue
 
@@ -243,7 +242,6 @@ def _auto_name_clusters_via_logits(clusters, paths, max_samples_per_cluster=5):
             # Находим категорию с максимальным средним логитом
             best_idx = int(np.argmax(avg_logits))
             best_category = PREDEFINED_CATEGORIES[best_idx]
-            best_logit = float(avg_logits[best_idx])
 
             # Проверяем, что логит достаточно высокий (не все категории одинаково плохие)
             # Порог: разница между лучшей и средней категорией

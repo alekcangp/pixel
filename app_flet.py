@@ -2,9 +2,27 @@ import flet as ft
 import asyncio
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
-from core import database, scanner, dedup, embedder, clusterer, search
+import config
+from core import database, scanner, dedup, embedder, clustererhdb, search, thumbnail_cache
+
+
+def _format_size(size_bytes: int) -> str:
+    """Форматирует размер в байтах в читаемый вид (КБ/МБ/ГБ)."""
+    try:
+        size_bytes = int(size_bytes)
+    except (TypeError, ValueError):
+        return "0 Б"
+    if size_bytes < 1024:
+        return f"{size_bytes} Б"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} КБ"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} МБ"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} ГБ"
 
 
 class ImageDedupApp:
@@ -37,20 +55,27 @@ class ImageDedupApp:
         self.current_gallery_paths = []
         self.current_gallery_scope = "overview"
         
+        # Кэш для path_to_cluster_map (оптимизация производительности)
+        self._cached_path_to_cluster = None
+        self._cached_path_to_cluster_scope = None
+        
         # Создаём UI
         self.create_layout()
         
         # Загружаем статистику
         self.load_stats()
         
-        # Показываем первую вкладку
-        self.show_overview_tab()
+        # Показываем первый кластер по умолчанию
+        self.show_clusters_tab()
         
         # Фоновая загрузка модели
         asyncio.create_task(self.preload_model())
         
         # Обработчик изменения размера окна
         self.page.on_resize = self.on_window_resize
+
+        # Обработчик закрытия окна — останавливаем фоновые вычисления
+        self.page.window.on_event = self.on_window_event
     
     def create_layout(self):
         """Создание основного layout"""
@@ -93,9 +118,17 @@ class ImageDedupApp:
     def create_stats_section(self):
         """Секция статистики"""
         self.stat_total = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
+        self.stat_total_size = ft.Text("0 Б", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
         self.stat_duplicates = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.RED)
+        self.stat_duplicates_size = ft.Text("0 Б", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
         self.stat_unique = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
-        self.model_status = ft.Text("⏳ Загрузка модели...", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.stat_unique_size = ft.Text("0 Б", size=10, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.model_status_ring = ft.ProgressRing(width=16, height=16, stroke_width=2)
+        self.model_status = ft.Text("Загрузка модели...", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.model_status_row = ft.Row(
+            [self.model_status_ring, self.model_status],
+            spacing=6,
+        )
         
         return ft.Column(
             [
@@ -103,129 +136,135 @@ class ImageDedupApp:
                 ft.Row(
                     [
                         ft.Column(
-                            [self.stat_total, ft.Text("Всего", size=12)],
+                            [self.stat_total, self.stat_total_size, ft.Text("Всего", size=12)],
                             alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         ft.Column(
-                            [self.stat_duplicates, ft.Text("Дубли", size=12)],
+                            [self.stat_duplicates, self.stat_duplicates_size, ft.Text("Дубли", size=12)],
                             alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         ft.Column(
-                            [self.stat_unique, ft.Text("Уникальных", size=12)],
+                            [self.stat_unique, self.stat_unique_size, ft.Text("Уникальных", size=12)],
                             alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_AROUND,
                 ),
-                self.model_status,
+                self.model_status_row,
             ],
             spacing=10,
         )
     
     def create_clusters_section(self):
-        """Секция категорий - список категорий с возможностью переключения"""
-        self.cluster_dropdown = ft.Dropdown(
-            label="Выберите категорию",
-            options=[],
-            width=250,
-            on_select=self.on_cluster_select,
-            visible=False,  # Скрываем dropdown, используем список
-        )
+        """Секция категорий - кнопки кластеров в 3 столбца"""
+        self.clusters_grid = ft.Column([])
         
-        self.clusters_list = ft.Column(
-            [],
-            scroll=ft.ScrollMode.AUTO,
-            spacing=5,
-        )
+        # Заголовок с количеством категорий
+        self.categories_header = ft.Text("Категории (0)", size=18, weight=ft.FontWeight.BOLD)
         
-        self.categories_count_text = ft.Text("Категории: 0", size=14, color=ft.Colors.ON_SURFACE_VARIANT, visible=False)
+        # Активный кластер для подсветки
+        self.active_cluster_id = None
         
         return ft.Column(
             [
-                ft.Text("Категории", size=18, weight=ft.FontWeight.BOLD),
-                self.categories_count_text,
-                self.cluster_dropdown,
-                self.clusters_list,
+                self.categories_header,
+                self.clusters_grid,
             ],
             spacing=10,
         )
     
     def update_clusters_list(self):
-        """Обновление списка категорий в боковой панели"""
-        self.clusters_list.controls.clear()
+        """Обновление списка категорий в боковой панели (кнопки в 3 столбца)"""
+        self.clusters_grid.controls.clear()
         
         if not self.clusters:
-            self.clusters_list.controls.append(
-                ft.Text("Нет категорий", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-            )
-            self.categories_count_text.value = "Категории: 0"
+            self.categories_header.value = "Категории (0)"
             return
         
-        # Обновляем количество категорий
-        self.categories_count_text.value = f"Категории: {len(self.clusters)}"
+        # Обновляем заголовок с количеством категорий
+        self.categories_header.value = f"Категории ({len(self.clusters)})"
         
-        for cluster_id, members in sorted(self.clusters.items()):
-            # Используем автоматически сгенерированное имя или стандартное
-            cluster_name = self.cluster_names.get(cluster_id, f"Категория {cluster_id}")
-            count = len(members)
+        # Создаём 3 столбца с кнопками
+        clusters_list = sorted(self.clusters.items())
+        columns = [[] for _ in range(3)]
+        
+        for i, (cluster_id, members) in enumerate(clusters_list):
+            col_idx = i % 3
+            columns[col_idx].append((cluster_id, members))
+        
+        # Создаём строки с кнопками
+        max_rows = max(len(col) for col in columns)
+        
+        for row_idx in range(max_rows):
+            row_buttons = []
+            for col_idx in range(3):
+                if row_idx < len(columns[col_idx]):
+                    cluster_id, members = columns[col_idx][row_idx]
+                    is_active = self.active_cluster_id == cluster_id
+                    # Нумерация с 1, показываем количество изображений
+                    button = ft.ElevatedButton(
+                        f"{cluster_id + 2} ({len(members)})",
+                        data=cluster_id,
+                        width=70,
+                        height=50,
+                        bgcolor=ft.Colors.PRIMARY if is_active else ft.Colors.SURFACE_CONTAINER_HIGHEST,
+                        color=ft.Colors.ON_PRIMARY if is_active else ft.Colors.ON_SURFACE,
+                        on_click=self.on_cluster_button_click,
+                        style=ft.ButtonStyle(
+                            padding=ft.Padding(6, 4, 6, 4),
+                            shape=ft.RoundedRectangleBorder(radius=6),
+                        ),
+                    )
+                    row_buttons.append(button)
+                else:
+                    row_buttons.append(ft.Container(width=70))
             
-            # Создаём контейнер для категории
-            cluster_item = ft.Container(
-                content=ft.Row(
-                    [
-                        ft.Icon(
-                            ft.Icons.FOLDER,
-                            color=ft.Colors.PRIMARY,
-                            size=20,
-                        ),
-                        ft.Column(
-                            [
-                                ft.Text(cluster_name, size=13, weight=ft.FontWeight.BOLD),
-                                ft.Text(f"{count} фото", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.START,
-                ),
-                padding=10,
-                border_radius=8,
-                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-                on_click=lambda e, cid=cluster_id: self.on_cluster_click(cid),
+            self.clusters_grid.controls.append(
+                ft.Row(row_buttons, spacing=6, alignment=ft.MainAxisAlignment.CENTER)
             )
-            
-            self.clusters_list.controls.append(cluster_item)
     
-    def on_cluster_click(self, cluster_id):
-        """Обработчик клика на кластер в боковой панели"""
-        self.cluster_dropdown.value = str(cluster_id)
-        self.current_tab = -1  # Кластерный режим (не активная вкладка)
+    def on_cluster_button_click(self, e):
+        """Обработчик клика на кнопку кластера"""
+        cluster_id = e.control.data
+        self._save_current_gallery_scroll()
+        self.active_cluster_id = cluster_id
+        self.current_tab = -1
         self.show_clusters_tab()
+        # Обновляем подсветку кнопок
+        self.update_clusters_list()
     
+    def on_window_event(self, e):
+        """Обработчик событий окна — при закрытии останавливаем фоновые вычисления."""
+        if e.data == ft.WindowEventType.CLOSE:
+            print("Закрытие окна: останавливаем фоновые вычисления...")
+            scanner.STOP_REQUESTED = True
+            self.scanning = False
+            # Гарантированно завершаем процесс, убивая фоновые потоки
+            os._exit(0)
+
     def on_window_resize(self, e):
         """Обработчик изменения размера окна - пересоздаём галерею"""
         # Сохраняем текущий offset
+        self._save_current_gallery_scroll()
         current_tab = self.current_tab
-        if current_tab == 0:
-            scope = "overview"
-        elif current_tab == -1:
-            scope = f"cluster_{self.cluster_dropdown.value}"
-        elif current_tab == 1:
+        if current_tab == -1:
+            scope = f"cluster_{self.active_cluster_id}"
+        elif current_tab == 0:
             scope = "search_results"
-        elif current_tab == 2:
+        elif current_tab == 1:
             scope = "export"
         else:
             return
         
         # Пересоздаём текущую вкладку
-        if current_tab == 0:
-            self.show_overview_tab()
-        elif current_tab == -1:
+        if current_tab == -1:
             self.show_clusters_tab()
-        elif current_tab == 1:
+        elif current_tab == 0:
             self.show_search_tab()
-        elif current_tab == 2:
+        elif current_tab == 1:
             self.show_export_tab()
     
     def create_scan_section(self):
@@ -253,9 +292,14 @@ class ImageDedupApp:
             on_click=self.toggle_scan,
         )
         
-        return ft.Row(
-            [self.scan_path_input, browse_scan_path_button, self.scan_button],
-            spacing=10,
+        return ft.Column(
+            [
+                ft.Row(
+                    [self.scan_path_input, browse_scan_path_button, self.scan_button],
+                    spacing=10,
+                ),
+            ],
+            spacing=5,
         )
     
     def create_progress_section(self):
@@ -286,19 +330,14 @@ class ImageDedupApp:
         self.tab_buttons = ft.Row(
             [
                 ft.ElevatedButton(
-                    "Обзор",
-                    icon=ft.Icons.PHOTO_LIBRARY,
-                    on_click=lambda e: self.switch_tab(0),
-                ),
-                ft.ElevatedButton(
                     "Поиск",
                     icon=ft.Icons.SEARCH,
-                    on_click=lambda e: self.switch_tab(1),
+                    on_click=lambda e: self.switch_tab(0),
                 ),
                 ft.ElevatedButton(
                     "Экспорт",
                     icon=ft.Icons.FOLDER_OPEN,
-                    on_click=lambda e: self.switch_tab(2),
+                    on_click=lambda e: self.switch_tab(1),
                 ),
             ],
             spacing=5,
@@ -306,12 +345,16 @@ class ImageDedupApp:
         
         # Контент вкладок
         self.tab_content = ft.Container(
-            content=ft.Text("Загрузка..."),
+            content=ft.Row(
+                [ft.ProgressRing(), ft.Text("Загрузка...", size=14)],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=10,
+            ),
             expand=True,
         )
         
-        # Текущая вкладка
-        self.current_tab = 0
+        # Текущая вкладка (-1 = кластерный режим)
+        self.current_tab = -1
         
         return ft.Column(
             [self.tab_buttons, self.tab_content],
@@ -326,9 +369,11 @@ class ImageDedupApp:
             from core.embedder import get_embedder
             get_embedder()
             self.model_loaded = True
+            self.model_status_ring.visible = False
             self.model_status.value = "✅ Модель загружена"
             self.model_status.color = ft.Colors.GREEN
         except Exception as e:
+            self.model_status_ring.visible = False
             self.model_status.value = f"⚠️ Ошибка: {e}"
             self.model_status.color = ft.Colors.RED
         finally:
@@ -344,10 +389,28 @@ class ImageDedupApp:
             self.stat_duplicates.value = str(stats["duplicates"])
             self.stat_unique.value = str(stats["unique"])
             
+            # Обновляем размеры
+            total_size = stats.get("total_size", 0)
+            self.stat_total_size.value = _format_size(total_size)
+            
+            # Размер дубликатов и уникальных — вычисляем из БД
+            try:
+                dup_size = database.get_duplicates_size()
+                self.stat_duplicates_size.value = _format_size(dup_size)
+                self.stat_unique_size.value = _format_size(max(total_size - dup_size, 0))
+            except Exception:
+                self.stat_duplicates_size.value = "—"
+                self.stat_unique_size.value = "—"
+            
             # Загрузить кластеры и их имена
             clusters, cluster_names = database.load_clusters_with_names()
+            old_clusters_id = id(self.clusters) if self.clusters else None
             self.clusters = clusters or {}
             self.cluster_names = cluster_names or {}
+            
+            # Инвалидировать кэш если кластеры изменились
+            if old_clusters_id != id(self.clusters):
+                self._invalidate_cluster_cache()
             
             # Обновить список категорий в боковой панели
             self.update_clusters_list()
@@ -355,6 +418,73 @@ class ImageDedupApp:
             self.page.update()
         except Exception as e:
             print(f"Ошибка загрузки статистики: {e}")
+    
+    def _find_gallery(self, control):
+        """Рекурсивно ищет GridView в дереве контролов."""
+        if isinstance(control, ft.GridView):
+            return control
+        if hasattr(control, 'controls'):
+            for child in control.controls:
+                result = self._find_gallery(child)
+                if result:
+                    return result
+        return None
+
+    def _save_current_gallery_scroll(self):
+        """Сохранить scroll offset текущей галереи"""
+        try:
+            if hasattr(self, 'tab_content') and self.tab_content.content:
+                gallery = self._find_gallery(self.tab_content.content)
+                if gallery:
+                    scroll_key = f"gallery_scroll_{self.current_gallery_scope}"
+                    # Если offset уже сохранён из события скролла — не перезаписываем
+                    existing = getattr(self.page.session, scroll_key, None)
+                    if existing is None or not isinstance(existing, (int, float)) or existing <= 0:
+                        # В Flet 0.86.5 нет scroll_offset на GridView,
+                        # используем offset из transform (если задан)
+                        offset = getattr(gallery, 'offset', None)
+                        if offset is not None and hasattr(offset, 'y'):
+                            setattr(self.page.session, scroll_key, offset.y)
+        except Exception:
+            pass
+
+    def _restore_gallery_scroll(self, gallery, scope, paths=None, page_size=None):
+        """Восстановить scroll offset галереи"""
+        try:
+            scroll_key = f"gallery_scroll_{scope}"
+            offset = getattr(self.page.session, scroll_key, None)
+            if offset is not None and isinstance(offset, (int, float)) and offset > 0:
+                async def do_restore():
+                    # Догружаем элементы до сохранённой lazy позиции,
+                    # чтобы скролл мог физически добраться до сохранённого offset
+                    if paths and page_size:
+                        lazy_key = f"gallery_lazy_offset_{scope}"
+                        saved_lazy = getattr(self.page.session, lazy_key, 0)
+                        if saved_lazy and isinstance(saved_lazy, (int, float)):
+                            saved_lazy = int(saved_lazy)
+                            # Догружаем пока не достигнем сохранённого lazy offset
+                            for _ in range(200):  # защита от бесконечного цикла
+                                current_lazy = getattr(self.page.session, f"gallery_offset_{scope}", 0)
+                                if current_lazy is None or not isinstance(current_lazy, (int, float)):
+                                    current_lazy = 0
+                                current_lazy = int(current_lazy)
+                                if current_lazy >= saved_lazy or current_lazy >= len(paths):
+                                    break
+                                self.load_more(paths, scope, gallery)
+                                await asyncio.sleep(0.05)
+                    
+                    # Пробуем несколько раз с задержкой, чтобы галерея успела отрисоваться
+                    for attempt in range(5):
+                        await asyncio.sleep(0.3)
+                        try:
+                            gallery.scroll_to(offset=offset, duration=0)
+                            self.page.update()
+                            return
+                        except Exception:
+                            pass
+                asyncio.create_task(do_restore())
+        except Exception:
+            pass
 
     def _progress_callback(self, stage: str, current: int, total: int, message: str):
         """Callback для обновления прогресс-бара из фоновых потоков.
@@ -395,11 +525,21 @@ class ImageDedupApp:
             import traceback
             traceback.print_exc()
     
+    def _get_available_disks(self):
+        """Возвращает список доступных дисков на Windows (C:\, D:\ и т.д.)"""
+        disks = []
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            path = f"{letter}:\\"
+            if os.path.exists(path):
+                disks.append(path)
+        return disks
+
     async def toggle_scan(self, e):
         """Запуск/остановка сканирования"""
         if self.scanning:
             # Останавливаем сканирование
             self.scanning = False
+            scanner.STOP_REQUESTED = True
             self.scan_button.text = "Сканировать"
             self.scan_button.icon = ft.Icons.SEARCH
             self.scan_button.bgcolor = ft.Colors.PRIMARY
@@ -414,14 +554,20 @@ class ImageDedupApp:
         
         # Проверка пути
         if scan_path.lower() in ["all_disks", "все диски"]:
-            # Не запускаем автоматически, показываем сообщение
-            self.show_snackbar("Выберите конкретный путь для сканирования", ft.Colors.ORANGE)
-            return
+            # Сканируем все доступные диски
+            disks = self._get_available_disks()
+            if not disks:
+                self.show_snackbar("Не найдено доступных дисков", ft.Colors.RED)
+                return
+            scan_paths = disks
         elif not os.path.exists(scan_path):
             self.show_snackbar(f"Путь не существует: {scan_path}", ft.Colors.RED)
             return
+        else:
+            scan_paths = [scan_path]
         
         self.scanning = True
+        scanner.STOP_REQUESTED = False
         self.scan_button.text = "Стоп"
         self.scan_button.icon = ft.Icons.STOP
         self.scan_button.bgcolor = ft.Colors.ERROR
@@ -435,20 +581,29 @@ class ImageDedupApp:
         self.page.update()
         
         try:
-            # 1. Сканирование
+            # 1. Сканирование (все пути последовательно)
             self.progress_text.value = "Сканирование..."
             self.progress_bar.value = 0
             self.page.update()
             
-            files = await asyncio.to_thread(
-                scanner.run,
-                scan_path,
-                None, None, None,
-                incremental=True,
-                progress_callback=self._progress_callback,
-            )
+            files = []
+            for i, path in enumerate(scan_paths):
+                if scanner.STOP_REQUESTED:
+                    break
+                self.progress_text.value = f"Сканирование ({i + 1}/{len(scan_paths)}): {path}"
+                self.page.update()
+                
+                result = await asyncio.to_thread(
+                    scanner.run,
+                    path,
+                    None, None, None,
+                    incremental=True,
+                    progress_callback=self._progress_callback,
+                )
+                if result:
+                    files.extend(result)
             
-            if not self.scanning:
+            if scanner.STOP_REQUESTED:
                 return
             
             if not files:
@@ -462,7 +617,7 @@ class ImageDedupApp:
             
             await asyncio.to_thread(dedup.run, incremental=True, progress_callback=self._progress_callback)
 
-            if not self.scanning:
+            if scanner.STOP_REQUESTED:
                 return
 
             # Обновляем статистику после дедупликации (дубликаты уже сохранены в БД)
@@ -478,23 +633,24 @@ class ImageDedupApp:
             result = await asyncio.to_thread(embedder.run, incremental=True, progress_callback=self._progress_callback)
             print(f"[DEBUG] embedder.run вернул: {result}")
             
-            if not self.scanning:
+            if scanner.STOP_REQUESTED:
                 return
             
-            # 4. Кластеризация
-            self.progress_text.value = "Кластеризация..."
-            self.progress_bar.value = 0
-            self.page.update()
-            
-            print("[DEBUG] Запуск clusterer.run...")
-            await asyncio.to_thread(clusterer.run, progress_callback=self._progress_callback)
-            print("[DEBUG] clusterer.run завершён")
-            
-            if not self.scanning:
-                return
-            
-            # Обновить статистику
-            self.load_stats()
+            # 4. Кластеризация (только если включено в конфиге)
+            if config.AUTO_CLUSTER_AFTER_SCAN:
+                self.progress_text.value = "Кластеризация..."
+                self.progress_bar.value = 0
+                self.page.update()
+                
+                print("[DEBUG] Запуск clustererhdb.run...")
+                await asyncio.to_thread(clustererhdb.run, progress_callback=self._progress_callback)
+                print("[DEBUG] clustererhdb.run завершён")
+                
+                if scanner.STOP_REQUESTED:
+                    return
+                
+                # Обновить статистику после кластеризации
+                self.load_stats()
             
             self.show_snackbar("Готово!", ft.Colors.GREEN)
             
@@ -505,6 +661,7 @@ class ImageDedupApp:
                 self.show_snackbar(f"Ошибка: {e}", ft.Colors.RED)
         finally:
             self.scanning = False
+            scanner.STOP_REQUESTED = False
             self.scan_button.text = "Сканировать"
             self.scan_button.icon = ft.Icons.SEARCH
             self.scan_button.bgcolor = ft.Colors.PRIMARY
@@ -546,23 +703,14 @@ class ImageDedupApp:
         self.page.snack_bar.open = True
         self.page.update()
     
-    def on_cluster_select(self, e):
-        """Обработчик выбора категории"""
-        self.current_tab = -1  # Кластерный режим (не активная вкладка)
-        self.show_clusters_tab()
-    
     def switch_tab(self, index: int):
         """Переключение вкладки"""
+        self._save_current_gallery_scroll()
         self.current_tab = index
         if index == 0:
-            self.show_overview_tab()
-        elif index == 1:
             self.show_search_tab()
-        elif index == 2:
+        elif index == 1:
             self.show_export_tab()
-        # NOTE: offset'ы галерей НЕ сбрасываются — они хранятся отдельно
-        # для каждого scope (gallery_offset_{scope}) и сохраняются между
-        # переключениями вкладок.
     
     def get_selection_state(self, paths: list) -> str:
         """Определить состояние выделения для иконки чекбокса.
@@ -592,110 +740,19 @@ class ImageDedupApp:
         else:  # partial
             return ft.Icons.INDETERMINATE_CHECK_BOX
     
-    def show_overview_tab(self):
-        """Показать вкладку 'Обзор' (без дубликатов)"""
-        images = database.load_images() or []
-        
-        if not images:
-            self.tab_content.content = ft.Text("База пуста. Нажмите «Сканировать»")
-            self.page.update()
-            return
-        
-        # Загружаем пути дубликатов, чтобы исключить их из обзора
-        duplicate_paths = database.load_duplicate_paths() or set()
-        
-        # Показываем только уникальные изображения (не дубликаты)
-        paths = [img["path"] for img in images if img["path"] not in duplicate_paths]
-        
-        # Кнопка "Выбрать/Снять все" с интерактивной иконкой
-        selection_state = self.get_selection_state(paths)
-        self.select_all_icon_button = ft.IconButton(
-            icon=self.get_checkbox_icon(selection_state),
-            tooltip="Выбрать/Снять все",
-            on_click=lambda: self.toggle_select_all(paths),
-        )
-        
-        # Счётчик выбранных
-        self.selected_count_text = ft.Text(f"Выбрано: {len([p for p in paths if p in self.selected_images])}", size=14)
-        
-        # Кнопки управления (без копирования)
-        controls_row = ft.Row(
-            [
-                self.select_all_icon_button,
-                self.selected_count_text,
-            ],
-            spacing=10,
-        )
-        
-        # Сохраняем текущий контекст галереи
-        self.current_gallery_paths = paths
-        self.current_gallery_scope = "overview"
-        
-        # Галерея
-        gallery = self.create_gallery(paths, "overview")
-        
-        self.tab_content.content = ft.Column(
-            [controls_row, ft.Divider(), gallery],
-            expand=True,
-        )
-        self.page.update()
-    
     def show_export_tab(self):
-        """Показать вкладку 'Экспорт'"""
-        images = database.load_images() or []
+        """Показать вкладку 'Экспорт' — выбранные файлы в галерее + статистика"""
+        # Выбранные файлы (только существующие)
+        selected_paths = [p for p in self.selected_images if os.path.exists(p)]
+        selected_paths.sort()
         
-        if not images:
-            self.tab_content.content = ft.Text("База пуста. Нажмите «Сканировать»")
-            self.page.update()
-            return
+        total_files = len(selected_paths)
         
-        # Загружаем кластеры
-        clusters = self.clusters or database.load_clusters() or {}
-        
-        # Вычисляем статистику экспорта:
-        # 1. Реальные (непустые) кластеры, которые будут экспортированы
-        # 2. Файлы, которые реально попадут в экспорт (в кластерах + без категории)
-        # 3. Их суммарный размер
-        
-        # Собираем пути, которые реально будут экспортированы (только существующие файлы),
-        # повторяя логику export_all_files
-        export_paths = set()
-        non_empty_clusters = 0
-        files_by_cluster = {}
-        unclustered = []
-        
-        for img in images:
-            path = img["path"]
-            if not os.path.exists(path):
-                continue  # Файл не существует - не будет экспортирован
-            found_cluster = False
-            for cluster_id, members in clusters.items():
-                if path in members:
-                    if cluster_id not in files_by_cluster:
-                        files_by_cluster[cluster_id] = []
-                    files_by_cluster[cluster_id].append(path)
-                    found_cluster = True
-                    break
-            if not found_cluster:
-                unclustered.append(path)
-        
-        # Считаем только непустые кластеры с существующими файлами
-        for cluster_id, files in files_by_cluster.items():
-            if files:
-                non_empty_clusters += 1
-                export_paths.update(files)
-        
-        export_paths.update(unclustered)
-        
-        total_files = len(export_paths)
-        total_categories = non_empty_clusters
-        
-        # Вычисляем общий размер файлов, подлежащих экспорту
+        # Вычисляем общий размер выбранных файлов
         total_size_bytes = 0
-        for path in export_paths:
+        for path in selected_paths:
             try:
-                if os.path.exists(path):
-                    total_size_bytes += os.path.getsize(path)
+                total_size_bytes += os.path.getsize(path)
             except:
                 pass
         
@@ -707,20 +764,12 @@ class ImageDedupApp:
         else:
             size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.2f} ГБ"
         
-        # Заголовок
-        header = ft.Text("Экспорт", size=18, weight=ft.FontWeight.BOLD)
-        
-        # Статистика
+        # Статистика выбранных файлов
         stats_row = ft.Row(
             [
                 ft.Column(
-                    [ft.Text(str(total_categories), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                     ft.Text("Категорий", size=12)],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
-                ft.Column(
                     [ft.Text(str(total_files), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                     ft.Text("Файлов", size=12)],
+                     ft.Text("Выбрано файлов", size=12)],
                     alignment=ft.MainAxisAlignment.CENTER,
                 ),
                 ft.Column(
@@ -747,7 +796,7 @@ class ImageDedupApp:
         
         # Кнопка экспорта
         export_button = ft.ElevatedButton(
-            "Экспортировать все",
+            "Экспортировать выбранные",
             icon=ft.Icons.DOWNLOAD,
             bgcolor=ft.Colors.PRIMARY,
             color=ft.Colors.ON_PRIMARY,
@@ -764,18 +813,35 @@ class ImageDedupApp:
             spacing=10,
         )
         
-        self.tab_content.content = ft.Column(
-            [header, stats_row, ft.Divider(), controls_row],
-            expand=True,
-            scroll=ft.ScrollMode.AUTO,
-        )
+        # Сохраняем текущий контекст галереи
+        self.current_gallery_paths = selected_paths
+        self.current_gallery_scope = "export"
+        
+        # Галерея выбранных файлов
+        if selected_paths:
+            gallery = self.create_gallery(selected_paths, "export")
+            content = ft.Column(
+                [stats_row, ft.Divider(), controls_row, ft.Divider(), gallery],
+                expand=True,
+            )
+        else:
+            content = ft.Column(
+                [stats_row, ft.Divider(), controls_row,
+                 ft.Text("Ничего не выбрано. Выберите изображения в галерее.", size=14, color=ft.Colors.ON_SURFACE_VARIANT)],
+                expand=True,
+            )
+        
+        self.tab_content.content = content
         self.page.update()
+        if selected_paths:
+            self._restore_gallery_scroll(gallery, "export", selected_paths, 100)
     
     def export_all_files(self, e):
-        """Экспорт всех файлов по категориям"""
-        images = database.load_images() or []
-        if not images:
-            self.show_snackbar("Нет файлов для экспорта", ft.Colors.ORANGE)
+        """Экспорт выбранных файлов по категориям"""
+        # Только выбранные файлы (существующие)
+        selected_paths = [p for p in self.selected_images if os.path.exists(p)]
+        if not selected_paths:
+            self.show_snackbar("Нет выбранных файлов для экспорта", ft.Colors.ORANGE)
             return
         
         dest_folder = self.export_dest_folder.value if hasattr(self, 'export_dest_folder') else "Фотоальбом"
@@ -785,12 +851,11 @@ class ImageDedupApp:
         # Загружаем кластеры
         clusters = self.clusters or database.load_clusters() or {}
         
-        # Группируем файлы по категориям
+        # Группируем выбранные файлы по категориям
         files_by_cluster = {}
         unclustered = []
         
-        for img in images:
-            path = img["path"]
+        for path in selected_paths:
             found_cluster = False
             for cluster_id, members in clusters.items():
                 if path in members:
@@ -812,46 +877,51 @@ class ImageDedupApp:
             cluster_folder = dest_path / f"Категория_{cluster_id}"
             cluster_folder.mkdir(parents=True, exist_ok=True)
             for file_path in files:
-                if os.path.exists(file_path):
-                    try:
-                        shutil.copy2(file_path, cluster_folder / Path(file_path).name)
-                        total_copied += 1
-                    except Exception as ex:
-                        print(f"Ошибка копирования {file_path}: {ex}")
+                try:
+                    shutil.copy2(file_path, cluster_folder / Path(file_path).name)
+                    total_copied += 1
+                except Exception as ex:
+                    print(f"Ошибка копирования {file_path}: {ex}")
         
         # Копируем некатегоризированные файлы
         if unclustered:
             unclustered_folder = dest_path / "Без_категории"
             unclustered_folder.mkdir(parents=True, exist_ok=True)
             for file_path in unclustered:
-                if os.path.exists(file_path):
-                    try:
-                        shutil.copy2(file_path, unclustered_folder / Path(file_path).name)
-                        total_copied += 1
-                    except Exception as ex:
-                        print(f"Ошибка копирования {file_path}: {ex}")
+                try:
+                    shutil.copy2(file_path, unclustered_folder / Path(file_path).name)
+                    total_copied += 1
+                except Exception as ex:
+                    print(f"Ошибка копирования {file_path}: {ex}")
         
         self.show_snackbar(f"Скопировано {total_copied} файлов в {dest_path}", ft.Colors.GREEN)
 
     def show_clusters_tab(self):
         """Показать вкладку 'Категории'"""
+        print(f"[DEBUG] show_clusters_tab called, clusters count={len(self.clusters)}")
         if not self.clusters:
+            print(f"[DEBUG] No clusters, showing placeholder")
             self.tab_content.content = ft.Text("Категории ещё не созданы. Запустите полный цикл.")
             self.page.update()
             return
         
         # Получить выбранную категорию
-        cluster_id = self.cluster_dropdown.value
-        if not cluster_id:
-            cluster_id = str(sorted(self.clusters.keys())[0])
+        if self.active_cluster_id is not None:
+            cluster_id = self.active_cluster_id
+        else:
+            cluster_id = sorted(self.clusters.keys())[0]
+            self.active_cluster_id = cluster_id
+        
+        print(f"[DEBUG] Showing cluster {cluster_id}")
+        
+        # Обновляем подсветку кнопок
+        self.update_clusters_list()
         
         members = self.clusters.get(int(cluster_id), [])
+        # Сортируем для стабильного порядка
+        members.sort()
         
-        # Получаем имя категории
-        cluster_name = self.cluster_names.get(int(cluster_id), f"Категория {cluster_id}")
-        
-        # Заголовок с именем категории
-        header = ft.Text(f"{cluster_name} ({len(members)} файлов)", size=18, weight=ft.FontWeight.BOLD)
+        print(f"[DEBUG] Cluster {cluster_id} has {len(members)} members")
         
         # Кнопка "Выбрать/Снять все" с интерактивной иконкой
         selection_state = self.get_selection_state(members)
@@ -881,10 +951,13 @@ class ImageDedupApp:
         gallery = self.create_gallery(members, f"cluster_{cluster_id}")
         
         self.tab_content.content = ft.Column(
-            [header, controls_row, ft.Divider(), gallery],
+            [controls_row, ft.Divider(), gallery],
             expand=True,
         )
+        print(f"[DEBUG] tab_content updated, calling page.update()")
         self.page.update()
+        print(f"[DEBUG] Restoring gallery scroll for cluster_{cluster_id}")
+        self._restore_gallery_scroll(gallery, f"cluster_{cluster_id}", members, 100)
     
     def show_search_tab(self):
         """Показать вкладку 'Поиск'"""
@@ -895,6 +968,7 @@ class ImageDedupApp:
                 label="Поиск по описанию",
                 hint_text="например: кот на окне",
                 expand=True,
+                on_submit=self.do_search,
             )
             
             self.search_button = ft.ElevatedButton(
@@ -907,6 +981,10 @@ class ImageDedupApp:
                 scroll=ft.ScrollMode.AUTO,
                 expand=True,
             )
+        
+        # Сохраняем текущий контекст галереи
+        self.current_gallery_scope = "search_results"
+        self.current_gallery_paths = getattr(self, 'search_result_paths', [])
         
         self.tab_content.content = ft.Column(
             [
@@ -934,6 +1012,12 @@ class ImageDedupApp:
             ]
             self.page.update()
             
+            # Сбрасываем offset, scroll и lazy offset для результатов поиска
+            session_key = "gallery_offset_search_results"
+            setattr(self.page.session, session_key, 0)
+            setattr(self.page.session, "gallery_scroll_search_results", 0)
+            setattr(self.page.session, "gallery_lazy_offset_search_results", 0)
+            
             # Поиск в фоне. top_k = 1000 — берём максимум, затем фильтруем
             # по порогу близости в core/search.py (динамическое количество).
             results = await asyncio.to_thread(
@@ -944,6 +1028,9 @@ class ImageDedupApp:
             
             if results:
                 paths = [p for p, _ in results]
+                paths.sort()
+                self.search_result_paths = paths
+                self.current_gallery_paths = paths
                 gallery = self.create_gallery(paths, "search_results")
                 
                 self.search_results_container.controls = [
@@ -952,18 +1039,128 @@ class ImageDedupApp:
                     gallery,
                 ]
             else:
+                self.search_result_paths = []
+                self.current_gallery_paths = []
                 self.search_results_container.controls = [
                     ft.Text("Ничего не найдено", size=14),
                 ]
             
             self.page.update()
+            if results:
+                self._restore_gallery_scroll(gallery, "search_results", paths, 100)
         except Exception as e:
+            self.search_results_container.controls = [
+                ft.Text(f"Ошибка поиска: {e}", size=14, color=ft.Colors.RED),
+            ]
+            self.page.update()
             self.show_snackbar(f"Ошибка поиска: {e}", ft.Colors.RED)
     
+    def _get_path_to_cluster_map(self):
+        """Возвращает dict {path: cluster_id} для всех изображений в кластерах.
+        
+        Оптимизировано с кэшированием - перестраивается только при изменении кластеров.
+        """
+        # Проверяем, нужно ли обновлять кэш
+        if (self._cached_path_to_cluster is not None and 
+            self._cached_path_to_cluster_scope == id(self.clusters)):
+            return self._cached_path_to_cluster
+        
+        # Перестраиваем кэш
+        clusters = self.clusters or database.load_clusters() or {}
+        path_to_cluster = {}
+        for cluster_id, members in clusters.items():
+            for path in members:
+                path_to_cluster[path] = cluster_id
+        
+        self._cached_path_to_cluster = path_to_cluster
+        self._cached_path_to_cluster_scope = id(self.clusters)
+        return path_to_cluster
+    
+    def _invalidate_cluster_cache(self):
+        """Инвалидировать кэш кластеров (вызывать при изменении кластеров)."""
+        self._cached_path_to_cluster = None
+        self._cached_path_to_cluster_scope = None
+
+    def _make_gallery_item(self, path: str, scope: str, gallery: ft.GridView, path_to_cluster: dict = None):
+        """Создаёт элемент галереи (изображение + бейдж категории для поиска)."""
+        is_selected = path in self.selected_images
+        
+        # Пробуем получить thumbnail из кэша (возвращает путь к временному файлу)
+        thumb_path = thumbnail_cache.get_thumbnail(path, size=150)
+        if thumb_path is not None:
+            image = ft.Image(
+                src=thumb_path,
+                fit="contain",
+                width=150,
+                height=150,
+            )
+        else:
+            # Fallback на оригинальный путь
+            image = ft.Image(
+                src=path,
+                fit="contain",
+                width=150,
+                height=150,
+            )
+        
+        # Для поиска показываем номер категории в углу
+        if scope in ("search_results", "export") and path_to_cluster:
+            cluster_id = path_to_cluster.get(path)
+            if cluster_id is not None:
+                badge = ft.Container(
+                    content=ft.Text(
+                        str(int(cluster_id) + 2),
+                        size=10,
+                        weight=ft.FontWeight.NORMAL,
+                        color=ft.Colors.with_opacity(0.7, ft.Colors.ON_SURFACE_VARIANT),
+                    ),
+                    bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.SURFACE_CONTAINER_HIGHEST),
+                    padding=ft.Padding(4, 1, 4, 1),
+                    border_radius=6,
+                )
+                content = ft.Stack(
+                    [
+                        image,
+                        ft.Container(
+                            content=badge,
+                            alignment=ft.Alignment.TOP_LEFT,
+                            padding=ft.Padding(4, 4, 0, 0),
+                        ),
+                    ],
+                    width=150,
+                    height=150,
+                )
+            else:
+                content = image
+        else:
+            content = image
+        
+        # Оборачиваем в GestureDetector для поддержки жестов
+        # on_tap_down - левый клик (выделение + рамка)
+        # on_secondary_tap - правый клик (preview/zoom)
+        def on_tap_down(e):
+            self.toggle_image_selection(path, gallery)
+        
+        def on_secondary_tap(e):
+            self.show_preview(path)
+        
+        return ft.GestureDetector(
+            content=ft.Container(
+                content=content,
+                border_radius=8,
+                border=ft.Border.all(3, ft.Colors.PRIMARY) if is_selected else None,
+                data=path,  # <-- важно: храним оригинальный путь для поиска контейнера
+            ),
+            on_tap_down=on_tap_down,
+            on_secondary_tap=on_secondary_tap,
+        )
+
     def create_gallery(self, paths: list, scope: str):
         """Создание галереи с lazy loading"""
+        print(f"[DEBUG] create_gallery called with {len(paths) if paths else 0} paths, scope={scope}")
         # Validate paths
         if not paths or not isinstance(paths, list):
+            print(f"[DEBUG] No paths or invalid paths list")
             return ft.Column([ft.Text("Нет изображений")])
         
         # Загружаем выделение из БД
@@ -971,29 +1168,33 @@ class ImageDedupApp:
         if saved_selection:
             self.selected_images.update(saved_selection)
         
+        # Для поиска и экспорта строим map path -> cluster_id (один раз)
+        path_to_cluster = self._get_path_to_cluster_map() if scope in ("search_results", "export") else None
+        
         # Состояние для lazy loading
         session_key = f"gallery_offset_{scope}"
         if not hasattr(self.page.session, session_key):
             setattr(self.page.session, session_key, 0)
         
-        offset = getattr(self.page.session, session_key, 0)
-        if offset is None:
-            offset = 0
-            setattr(self.page.session, session_key, 0)
+        # Всегда начинаем с 0. _restore_gallery_scroll догрузит элементы
+        # до сохранённой lazy позиции, чтобы скролл мог восстановиться.
+        offset = 0
+        setattr(self.page.session, session_key, 0)
         
-        # Ensure offset is an integer
-        try:
-            offset = int(offset)
-        except (TypeError, ValueError):
-            offset = 0
-            setattr(self.page.session, session_key, 0)
+        # Для обзора используем меньший page_size для производительности
+        if scope == "overview":
+            page_size = 20
+        else:
+            page_size = 100
         
-        page_size = 50
         try:
             page_paths = paths[offset:offset + page_size]
         except (TypeError, ValueError):
-            page_paths = paths[:50]
+            page_size = 20 if scope == "overview" else 100
+            page_paths = paths[:page_size]
             offset = 0
+        
+        print(f"[DEBUG] Creating GridView with {len(page_paths)} initial items")
         
         # Создаём GridView
         gallery = ft.GridView(
@@ -1008,64 +1209,84 @@ class ImageDedupApp:
         
         # Добавляем изображения
         for path in page_paths:
-            is_selected = path in self.selected_images
             gallery.controls.append(
-                ft.Container(
-                    content=ft.Image(
-                        src=path,
-                        fit="contain",
-                        width=150,
-                        height=150,
-                    ),
-                    border_radius=8,
-                    border=ft.Border.all(3, ft.Colors.PRIMARY) if is_selected else None,
-                    on_click=lambda e, p=path: self.toggle_image_selection(p, gallery),
-                    on_long_press=lambda e, p=path: self.show_preview(p),
-                )
+                self._make_gallery_item(path, scope, gallery, path_to_cluster)
             )
         
-        # Кнопка "Загрузить ещё"
-        try:
-            if offset + page_size < len(paths):
-                gallery.controls.append(
-                    ft.ElevatedButton(
-                        "Загрузить ещё...",
-                        on_click=lambda: self.load_more(paths, scope, gallery),
-                        icon=ft.Icons.ADD,
-                    )
-                )
-        except (TypeError, ValueError):
-            pass
-        
+        print(f"[DEBUG] Gallery created with {len(gallery.controls)} controls")
         return gallery
     
     def create_scroll_handler(self, paths: list, scope: str, page_size: int):
-        """Создать обработчик скролла для lazy loading"""
+        """Создать обработчик скролла для lazy loading (Infinite Scroll)"""
+        # Отслеживаем последний загруженный offset для этого scope
+        last_loaded_key = f"gallery_last_loaded_{scope}"
+        
         def on_scroll(e: ft.ScrollEvent):
             try:
-                # Если прокрутились до конца, загружаем ещё
-                scroll_delta = getattr(e, 'scroll_delta', None)
-                if scroll_delta is None or not isinstance(scroll_delta, (int, float)):
+                # В Flet 0.86.5 ScrollEvent имеет local_position (Offset) и scroll_delta (Offset)
+                # Получаем текущую позицию скролла из local_position.y
+                local_pos = getattr(e, 'local_position', None)
+                scroll_y = 0.0
+                if local_pos is not None and hasattr(local_pos, 'y'):
+                    scroll_y = float(local_pos.y)
+                
+                # Сохраняем текущий scroll offset для восстановления при переключении
+                if scroll_y > 0:
+                    scroll_key = f"gallery_scroll_{scope}"
+                    setattr(self.page.session, scroll_key, scroll_y)
+                    
+                    # Сохраняем lazy offset (сколько элементов загружено) для восстановления
+                    lazy_key = f"gallery_lazy_offset_{scope}"
+                    lazy_offset = getattr(self.page.session, f"gallery_offset_{scope}", 0)
+                    if lazy_offset is not None and isinstance(lazy_offset, (int, float)):
+                        setattr(self.page.session, lazy_key, int(lazy_offset))
+                
+                # Получаем текущий offset
+                session_key = f"gallery_offset_{scope}"
+                offset = getattr(self.page.session, session_key, 0)
+                if offset is None or not isinstance(offset, (int, float)):
+                    offset = 0
+                offset_int = int(offset)
+                
+                paths_len = int(len(paths)) if paths is not None else 0
+                
+                # Проверяем, дошли ли до конца
+                if offset_int + page_size >= paths_len:
                     return
                 
-                if scroll_delta > 0:  # Скролл вниз
-                    session_key = f"gallery_offset_{scope}"
-                    offset = getattr(self.page.session, session_key, 0)
-                    
-                    # Ensure offset is a valid number
-                    if offset is None or not isinstance(offset, (int, float)):
-                        offset = 0
-                    
-                    # Convert to int for comparison
-                    offset_int = int(offset)
-                    paths_len = int(len(paths)) if paths is not None else 0
-                    
-                    # Проверяем, дошли ли до конца
-                    if offset_int + page_size >= paths_len:
-                        return
-                    
-                    # Загружаем следующую порцию
+                # Проверяем, не загружаем ли мы уже (защита от повторных вызовов)
+                last_loaded = getattr(self.page.session, last_loaded_key, 0)
+                if last_loaded is not None and isinstance(last_loaded, (int, float)):
+                    last_loaded = int(last_loaded)
+                else:
+                    last_loaded = 0
+                
+                if last_loaded >= offset_int + page_size:
+                    return
+                
+                # Определяем, близко ли пользователь к концу загруженного контента
+                should_load = False
+                
+                # Отслеживаем максимальную виденную позицию скролла
+                max_seen_key = f"gallery_max_scroll_{scope}"
+                max_seen = getattr(self.page.session, max_seen_key, 0)
+                if max_seen is None or not isinstance(max_seen, (int, float)):
+                    max_seen = 0
+                
+                if scroll_y > max_seen:
+                    setattr(self.page.session, max_seen_key, scroll_y)
+                
+                # Если прокрутили больше 80% от максимальной виденной позиции — загружаем
+                if max_seen > 0 and scroll_y >= max_seen * 0.8:
+                    should_load = True
+                # Или если scroll_y очень большой (более 3 экранов)
+                elif scroll_y > 1500:
+                    should_load = True
+                
+                if should_load:
+                    setattr(self.page.session, last_loaded_key, offset_int + page_size)
                     self.load_more(paths, scope, e.control)
+                    
             except Exception as ex:
                 # Log error for debugging
                 print(f"Scroll error: {ex}")
@@ -1075,7 +1296,7 @@ class ImageDedupApp:
         return on_scroll
     
     def load_more(self, paths: list, scope: str, gallery: ft.GridView):
-        """Загрузка следующей порции"""
+        """Загрузка следующей порции (Infinite Scroll)"""
         try:
             # Validate inputs
             if not paths or not isinstance(paths, list):
@@ -1083,7 +1304,12 @@ class ImageDedupApp:
             if gallery is None:
                 return
             
-            page_size = 50
+            # Используем тот же page_size что и в create_gallery
+            if scope == "overview":
+                page_size = 20
+            else:
+                page_size = 100
+            
             session_key = f"gallery_offset_{scope}"
             offset = getattr(self.page.session, session_key, 0)
             
@@ -1100,42 +1326,18 @@ class ImageDedupApp:
             
             page_paths = paths[new_offset:new_offset + page_size]
             
-            # Удаляем кнопку "Загрузить ещё" если есть
-            if gallery.controls and len(gallery.controls) > 0:
-                last_control = gallery.controls[-1]
-                if isinstance(last_control, ft.ElevatedButton):
-                    gallery.controls.pop()
+            # Для поиска и экспорта строим map path -> cluster_id
+            path_to_cluster = self._get_path_to_cluster_map() if scope in ("search_results", "export") else None
             
             # Добавляем новые изображения
             for path in page_paths:
-                is_selected = path in self.selected_images
                 gallery.controls.append(
-                    ft.Container(
-                        content=ft.Image(
-                            src=path,
-                            fit="contain",
-                            width=150,
-                            height=150,
-                        ),
-                        border_radius=8,
-                        border=ft.Border.all(3, ft.Colors.PRIMARY) if is_selected else None,
-                        on_click=lambda e, p=path: self.toggle_image_selection(p, gallery),
-                        on_long_press=lambda e, p=path: self.show_preview(p),
-                    )
+                    self._make_gallery_item(path, scope, gallery, path_to_cluster)
                 )
             
             setattr(self.page.session, f"gallery_offset_{scope}", new_offset)
-            
-            # Добавляем кнопку "Загрузить ещё" если есть ещё
-            paths_len = int(len(paths)) if paths is not None else 0
-            if new_offset + page_size < paths_len:
-                gallery.controls.append(
-                    ft.ElevatedButton(
-                        "Загрузить ещё...",
-                        on_click=lambda: self.load_more(paths, scope, gallery),
-                        icon=ft.Icons.ADD,
-                    )
-                )
+            # Сохраняем lazy offset для восстановления скролла
+            setattr(self.page.session, f"gallery_lazy_offset_{scope}", new_offset)
             
             self.page.update()
         except Exception as ex:
@@ -1159,15 +1361,16 @@ class ImageDedupApp:
         database.save_selected_files(list(self.selected_images), scope="global")
         
         # Обновляем визуальную рамку у конкретного контейнера
+        updated = False
         if gallery:
             for control in gallery.controls:
-                if isinstance(control, ft.Container):
-                    # Проверяем, является ли этот контейнер искомым изображением
-                    img_control = control.content
-                    if isinstance(img_control, ft.Image) and img_control.src == path:
-                        is_selected = path in self.selected_images
-                        control.border = ft.Border.all(3, ft.Colors.PRIMARY) if is_selected else None
-                        break
+                # Элементы галереи обёрнуты в GestureDetector
+                container = control.content if isinstance(control, ft.GestureDetector) else control
+                if isinstance(container, ft.Container) and container.data == path:
+                    is_selected = path in self.selected_images
+                    container.border = ft.Border.all(3, ft.Colors.PRIMARY) if is_selected else None
+                    updated = True
+                    break
         
         # Обновляем счётчик выбранных
         if hasattr(self, 'selected_count_text'):
@@ -1197,15 +1400,21 @@ class ImageDedupApp:
         self.show_snackbar(f"Выбрано: {len(self.selected_images)} файлов", ft.Colors.BLUE)
         
         # Обновляем текущую вкладку
-        if self.current_tab == 0:
-            self.show_overview_tab()
-        elif self.current_tab == -1:
+        if self.current_tab == -1:
             self.show_clusters_tab()
-        elif self.current_tab == 2:
+        elif self.current_tab == 0:
+            self.show_search_tab()
+        elif self.current_tab == 1:
             self.show_export_tab()
     
     def show_preview(self, path: str):
-        """Показать preview изображения с зумом"""
+        """Показать preview изображения с зумом, навигацией и полным путём."""
+        # Список путей текущей галереи для навигации
+        paths = self.current_gallery_paths or [path]
+        if path not in paths:
+            paths = [path] + paths
+        current_idx = paths.index(path) if path in paths else 0
+        
         preview_image = ft.Image(
             src=path,
             fit="contain",
@@ -1213,9 +1422,24 @@ class ImageDedupApp:
             height=600,
         )
         
+        path_text = ft.Text(
+            path,
+            size=12,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            selectable=True,
+            text_align=ft.TextAlign.CENTER,
+        )
+        
+        counter_text = ft.Text(
+            f"{current_idx + 1} / {len(paths)}",
+            size=12,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+        )
+        
         def close_dialog(e):
-            dialog.open = False
-            self.page.update()
+            if hasattr(self.page, 'dialog') and self.page.dialog:
+                self.page.dialog.open = False
+                self.page.update()
         
         def zoom_in(e):
             preview_image.width = min(preview_image.width * 1.2, 1200)
@@ -1232,11 +1456,51 @@ class ImageDedupApp:
             preview_image.height = 600
             self.page.update()
         
+        def navigate(delta):
+            nonlocal current_idx
+            if not paths:
+                return
+            current_idx = (current_idx + delta) % len(paths)
+            new_path = paths[current_idx]
+            preview_image.src = new_path
+            path_text.value = new_path
+            counter_text.value = f"{current_idx + 1} / {len(paths)}"
+            reset_zoom(None)
+            self.page.update()
+        
+        def prev(e):
+            navigate(-1)
+        
+        def next(e):
+            navigate(1)
+        
+        # Оборачиваем изображение в GestureDetector для поддержки двойного клика в десктопе
+        # on_double_tap - двойной клик для увеличения
+        preview_with_gesture = ft.GestureDetector(
+            content=preview_image,
+            on_double_tap=zoom_in,
+        )
+        
         dialog = ft.AlertDialog(
             content=ft.Column(
                 [
                     ft.Row(
                         [
+                            ft.IconButton(
+                                icon=ft.Icons.CLOSE,
+                                tooltip="Закрыть",
+                                on_click=close_dialog,
+                            ),
+                            ft.IconButton(
+                                icon=ft.Icons.ARROW_BACK,
+                                tooltip="Назад",
+                                on_click=prev,
+                            ),
+                            ft.IconButton(
+                                icon=ft.Icons.ARROW_FORWARD,
+                                tooltip="Вперёд",
+                                on_click=next,
+                            ),
                             ft.IconButton(
                                 icon=ft.Icons.ZOOM_IN,
                                 tooltip="Увеличить",
@@ -1255,11 +1519,9 @@ class ImageDedupApp:
                         ],
                         alignment=ft.MainAxisAlignment.CENTER,
                     ),
-                    preview_image,
-                    ft.ElevatedButton(
-                        "Закрыть",
-                        on_click=close_dialog,
-                    ),
+                    counter_text,
+                    preview_with_gesture,
+                    path_text,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=10,
@@ -1269,7 +1531,51 @@ class ImageDedupApp:
         )
         
         self.page.dialog = dialog
-        dialog.open = True
+        self.page.show_dialog(dialog)
+    
+    def show_context_menu(self, path: str, local_position=None):
+        """Показать контекстное меню при правом клике на изображение"""
+        print(f"[DEBUG] show_context_menu called for {path}, position={local_position}")
+        
+        def open_preview(e):
+            print(f"[DEBUG] open_preview clicked for {path}")
+            self.page.update()
+            self.show_preview(path)
+        
+        def open_location(e):
+            print(f"[DEBUG] open_location clicked for {path}")
+            self.page.update()
+            folder = os.path.dirname(path)
+            if os.path.exists(folder):
+                os.startfile(folder)
+        
+        # Создаём контейнер для позиционирования меню
+        menu_container = ft.Container(
+            content=ft.PopupMenuButton(
+                items=[
+                    ft.PopupMenuItem(
+                        content=ft.Text("Увеличить"),
+                        icon=ft.Icons.ZOOM_IN,
+                        on_click=open_preview,
+                    ),
+                    ft.PopupMenuItem(
+                        content=ft.Text("Расположение"),
+                        icon=ft.Icons.FOLDER_OPEN,
+                        on_click=open_location,
+                    ),
+                ],
+            ),
+            # Позиционируем по координатам клика, если они переданы
+            left=local_position.x if local_position and hasattr(local_position, 'x') else 100,
+            top=local_position.y if local_position and hasattr(local_position, 'y') else 100,
+        )
+        
+        # Добавляем в overlay для корректного отображения в десктопном режиме
+        self.page.overlay.append(menu_container)
+        
+        # Открываем меню
+        menu_container.content.open = True
+        print(f"[DEBUG] Opening context menu popup for {path} at position ({menu_container.left}, {menu_container.top})")
         self.page.update()
     
     def browse_destination_folder(self, text_field: ft.TextField):

@@ -6,3 +6,7 @@ venv/
 *.egg-info/
 dist/
 build/
+storage/*.db
+storage/*.db-journal
+storage/*.db-wal
+storage/*.db-shm

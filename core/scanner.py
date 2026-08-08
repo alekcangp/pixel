@@ -6,6 +6,9 @@ from collections import Counter
 import config
 from core import database
 
+# Флаг остановки сканирования (устанавливается из UI)
+STOP_REQUESTED = False
+
 
 def _normalize_extensions(extensions):
     if extensions is None:
@@ -42,6 +45,7 @@ def _file_hash(path, size=None):
 
 
 def _count_matching_files(path, extensions=None, exclude_dirs=None, min_size=None):
+    global STOP_REQUESTED
     ext_set = set(_normalize_extensions(extensions))
     exclude_set = _normalize_exclude_dirs(exclude_dirs)
     if min_size is None:
@@ -50,10 +54,14 @@ def _count_matching_files(path, extensions=None, exclude_dirs=None, min_size=Non
     count = 0
     stack = [path]
     while stack:
+        if STOP_REQUESTED:
+            return count
         current = stack.pop()
         try:
             with os.scandir(current) as it:
                 for entry in it:
+                    if STOP_REQUESTED:
+                        return count
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             if entry.name.lower() in exclude_set:
@@ -79,6 +87,7 @@ def _count_matching_files(path, extensions=None, exclude_dirs=None, min_size=Non
 
 def scan_directory(path, extensions=None, exclude_dirs=None, min_size=None, progress_callback=None):
     """Рекурсивно сканирует директорию, собирает файлы с указанными расширениями."""
+    global STOP_REQUESTED
     ext_set = set(_normalize_extensions(extensions))
     exclude_set = _normalize_exclude_dirs(exclude_dirs)
     if min_size is None:
@@ -89,10 +98,14 @@ def scan_directory(path, extensions=None, exclude_dirs=None, min_size=None, prog
     processed = 0
     stack = [path]
     while stack:
+        if STOP_REQUESTED:
+            return files
         current = stack.pop()
         try:
             with os.scandir(current) as it:
                 for entry in it:
+                    if STOP_REQUESTED:
+                        return files
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             if entry.name.lower() in exclude_set:

@@ -79,9 +79,10 @@ python main.py embed
 
 ```bash
 python main.py cluster
+python main.py cluster-hdb
 ```
 
-Кластеризует эмбеддинги (MiniBatchKMeans), выводит размеры кластеров и примеры путей. Число кластеров выбирается автоматически через комбинированную метрику silhouette + Davies-Bouldin. Автоматическое именование кластеров через `logits_per_image` модели SigLIP2.
+Кластеризует эмбеддинги. `cluster` использует MiniBatchKMeans с автоматическим выбором числа кластеров через комбинированную метрику silhouette + Davies-Bouldin и автоименованием через `logits_per_image` модели SigLIP2. `cluster-hdb` использует HDBSCAN + UMAP.
 
 ### 6. Семантический поиск
 
@@ -113,7 +114,8 @@ ss6/
 │   ├── scanner.py          # этап 1: сканирование
 │   ├── dedup.py            # этап 2: дедупликация (pHash + LSH + Union-Find)
 │   ├── embedder.py         # этап 3: эмбеддинги SigLIP2
-│   ├── clusterer.py        # этап 4: кластеризация + автоименование
+│   ├── clusterer.py        # этап 4: кластеризация (MiniBatchKMeans) + автоименование
+│   ├── clustererhdb.py     # этап 4b: кластеризация (HDBSCAN + UMAP)
 │   └── search.py           # этап 5: семантический поиск + pHash LSH-поиск
 └── storage/                # создаётся автоматически
     └── images.db           # единая SQLite-база данных
@@ -132,7 +134,6 @@ ss6/
 | `SIGLIP_MODEL` | Модель SigLIP2 |
 | `EMBED_BATCH_SIZE` | Размер батча эмбеддингов (16) |
 | `EMBED_IMAGE_SIZE` | Размер изображения для эмбеддингов (224) |
-| `CLUSTER_MAX_CLUSTERS (deprecated)` | Не используется в логике (12) |
 | `CLUSTER_MIN_CLUSTERS` | Минимальное число кластеров (2) |
 | `CLUSTER_RANDOM_STATE` | Random state для воспроизводимости (42) |
 | `SEARCH_TOP_K` | Кол-во результатов поиска (10) |

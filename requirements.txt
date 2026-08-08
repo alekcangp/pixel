@@ -5,7 +5,6 @@ pillow
 scikit-learn
 faiss-cpu
 numpy
-pandas
 opencv-python-headless
 flet>=0.21.0
 umap-learn

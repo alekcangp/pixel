@@ -40,6 +40,7 @@ def _get_conn():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     if not _initialized:
         _init_schema(conn)
         _initialized = True
@@ -146,16 +147,6 @@ def load_selected_files(scope="global"):
         if not rows:
             return None
         return {r["path"] for r in rows}
-    finally:
-        conn.close()
-
-
-def clear_selected_files(scope="global"):
-    """Очищает выделенные файлы для указанного scope."""
-    conn = _get_conn()
-    try:
-        conn.execute("DELETE FROM selected_files WHERE scope = ?", (scope,))
-        conn.commit()
     finally:
         conn.close()
 
@@ -315,13 +306,18 @@ def load_phashes_with_mtime():
 # Embeddings
 # ============================================================
 
-def save_embeddings(vectors, paths, mtime_map=None):
-    """Сохраняет эмбеддинги. vectors: np.ndarray (N, D), paths: list[str], mtime_map: {path: mtime}."""
+def save_embeddings(vectors, paths, mtime_map=None, incremental=False):
+    """Сохраняет эмбеддинги. vectors: np.ndarray (N, D), paths: list[str], mtime_map: {path: mtime}.
+    
+    Args:
+        incremental: если True, не удаляет старые эмбеддинги, а обновляет/добавляет новые.
+    """
     import numpy as np
 
     conn = _get_conn()
     try:
-        conn.execute("DELETE FROM embeddings")
+        if not incremental:
+            conn.execute("DELETE FROM embeddings")
         rows = []
         for vec, path in zip(vectors, paths):
             r = conn.execute("SELECT id FROM images WHERE path = ?", (path,)).fetchone()
@@ -337,15 +333,30 @@ def save_embeddings(vectors, paths, mtime_map=None):
         conn.close()
 
 
-def load_embeddings():
-    """Возвращает (np.ndarray (N,D), list[paths]) или (None, None)."""
+def load_embeddings(exclude_duplicates=True):
+    """Возвращает (np.ndarray (N,D), list[paths]) или (None, None).
+    
+    Args:
+        exclude_duplicates: если True, исключает дубликаты (is_canonical=0) из загрузки.
+    """
     import numpy as np
 
     conn = _get_conn()
     try:
-        rows = conn.execute(
-            "SELECT i.path, e.vector FROM embeddings e JOIN images i ON e.image_id = i.id ORDER BY i.id"
-        ).fetchall()
+        if exclude_duplicates:
+            # Исключаем дубликаты: берем только canonical изображения
+            rows = conn.execute(
+                """SELECT i.path, e.vector 
+                   FROM embeddings e 
+                   JOIN images i ON e.image_id = i.id 
+                   LEFT JOIN dedup_groups d ON i.id = d.image_id AND d.is_canonical = 0
+                   WHERE d.image_id IS NULL
+                   ORDER BY i.id"""
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT i.path, e.vector FROM embeddings e JOIN images i ON e.image_id = i.id ORDER BY i.id"
+            ).fetchall()
         if not rows:
             return None, None
         paths = [r["path"] for r in rows]
@@ -415,6 +426,29 @@ def load_clusters():
         for r in rows:
             clusters.setdefault(int(r["cluster_id"]), []).append(r["path"])
         return clusters
+    finally:
+        conn.close()
+
+
+def save_garbage(paths):
+    """Помечает пути как визуальный мусор (cluster_id = GARBAGE_LABEL).
+
+    Args:
+        paths: list[str] — пути файлов, подтверждённых как визуальный мусор.
+    """
+    import config
+    conn = _get_conn()
+    try:
+        rows = []
+        for path in paths:
+            r = conn.execute("SELECT id FROM images WHERE path = ?", (path,)).fetchone()
+            if r:
+                rows.append((r["id"], config.GARBAGE_LABEL, "garbage"))
+        if rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO clusters (image_id, cluster_id, name) VALUES (?, ?, ?)", rows
+            )
+            conn.commit()
     finally:
         conn.close()
 
@@ -515,6 +549,18 @@ def load_duplicate_paths():
         conn.close()
 
 
+def get_duplicates_size():
+    """Возвращает суммарный размер дубликатов (is_canonical=0) в байтах."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(i.size), 0) FROM dedup_groups g JOIN images i ON g.image_id = i.id WHERE g.is_canonical = 0"
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
 # ============================================================
 # Failed files (повреждённые/недоступные)
 # ============================================================
@@ -571,17 +617,32 @@ def clear_all():
 
 
 def load_db_stats():
-    """Возвращает статистику: total, duplicates, unique, clusters."""
+    """Возвращает статистику: total, duplicates, unique, clusters, garbage, total_size."""
+    import config
     conn = _get_conn()
     try:
         total = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-        duplicates = conn.execute("SELECT COUNT(*) FROM dedup_groups WHERE is_canonical = 0").fetchone()[0]
-        clusters = conn.execute("SELECT COUNT(DISTINCT cluster_id) FROM clusters").fetchone()[0]
+        # Считаем дубликаты только для файлов, которые реально есть в images
+        # (иначе осиротевшие записи в dedup_groups искажают статистику)
+        duplicates = conn.execute(
+            "SELECT COUNT(*) FROM dedup_groups g JOIN images i ON g.image_id = i.id WHERE g.is_canonical = 0"
+        ).fetchone()[0]
+        # Исключаем шум (-1) и визуальный мусор (-2) из подсчёта кластеров
+        clusters = conn.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM clusters WHERE cluster_id > 0"
+        ).fetchone()[0]
+        garbage = conn.execute(
+            "SELECT COUNT(*) FROM clusters WHERE cluster_id = ?", (config.GARBAGE_LABEL,)
+        ).fetchone()[0]
+        # Общий размер всех изображений в байтах
+        total_size = conn.execute("SELECT COALESCE(SUM(size), 0) FROM images").fetchone()[0]
         return {
             "total": total,
             "duplicates": duplicates,
             "unique": total - duplicates,
             "clusters": clusters,
+            "garbage": garbage,
+            "total_size": total_size,
         }
     finally:
         conn.close()

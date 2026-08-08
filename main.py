@@ -85,20 +85,6 @@ def cmd_phash_search(args):
     search.run_hash_search(image_path, top_k=top_k)
 
 
-def cmd_zero_shot(args):
-    from core import zero_shot
-    zero_shot.run(
-        input_dir=args.input,
-        output_dir=args.output,
-        categories=[c.strip() for c in args.categories.split(",")] if args.categories else None,
-        move=args.move,
-        threshold=args.threshold,
-        incremental=not args.full,
-        batch_size=args.batch_size,
-        model_name=args.model,
-    )
-
-
 def cmd_ui_flet(args):
     from app_flet import main
     main()
@@ -172,17 +158,6 @@ def main():
     p_phash_search.add_argument("query", help="Путь к изображению")
     p_phash_search.add_argument("--top-k", type=int, default=None, help="Кол-во результатов")
     p_phash_search.set_defaults(func=cmd_phash_search)
-
-    p_zero_shot = sub.add_parser("zero-shot", help="Zero-shot классификация изображений по заранее известным категориям через CLIP")
-    p_zero_shot.add_argument("--input", required=True, help="Путь к директории с изображениями для классификации")
-    p_zero_shot.add_argument("--output", default=config.ZERO_SHOT_OUTPUT_DIR, help="Путь к выходной директории (по умолчанию storage/classified)")
-    p_zero_shot.add_argument("--categories", default=None, help="Список категорий через запятую (если не задан, берутся из названий подпапок входной директории)")
-    p_zero_shot.add_argument("--move", action="store_true", help="Перемещать файлы вместо копирования")
-    p_zero_shot.add_argument("--threshold", type=float, default=config.ZERO_SHOT_DEFAULT_THRESHOLD, help="Минимальный порог cosine similarity для отнесения к категории (по умолчанию %(default)s)")
-    p_zero_shot.add_argument("--batch-size", type=int, default=16, help="Размер батча для обработки (по умолчанию 16)")
-    p_zero_shot.add_argument("--model", default=config.CLIP_MODEL, help="Название модели CLIP (по умолчанию %(default)s)")
-    p_zero_shot.add_argument("--full", action="store_true", help="Полный пересчёт (игнорировать уже классифицированные файлы)")
-    p_zero_shot.set_defaults(func=cmd_zero_shot)
 
     p_ui_flet = sub.add_parser("ui-flet", help="Запустить Flet desktop UI")
     p_ui_flet.set_defaults(func=cmd_ui_flet)

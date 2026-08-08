@@ -239,11 +239,6 @@ class LSHIndex:
         results.sort(key=lambda x: x[0])
         return results
 
-    def query(self, query_hash, k=1, upper_bound=float("inf")):
-        """Возвращает k ближайших результатов в пределах upper_bound."""
-        results = self.radius_search(query_hash, radius=upper_bound)
-        return results[:k]
-
     def find_clusters(self, progress_callback=None):
         """Кластеризует все хэши через Union-Find.
 
@@ -516,12 +511,20 @@ def run(move_to=None, progress_callback=None, incremental=True):
         existing_paths = set(existing_with_mtime.keys())
         current_paths = {f["path"] for f in files}
 
+        # Исключаем дубликаты и повреждённые файлы (аналогично embedder.py)
+        dup_paths = database.load_duplicate_paths() or set()
+        failed_paths = database.load_failed_paths() or set()
+        excluded = dup_paths | failed_paths
+
         # Файлы, для которых нужно вычислить pHash:
         #   - новые (нет в existing_paths)
         #   - изменённые (mtime отличается от сохранённого)
+        #   - не входят в excluded (дубликаты/повреждённые)
         files_to_process = []
         for f in files:
             p = f["path"]
+            if p in excluded:
+                continue
             if p not in existing_paths:
                 files_to_process.append(f)
             else:
@@ -531,11 +534,14 @@ def run(move_to=None, progress_callback=None, incremental=True):
 
         print(f"Инкрементальный режим:")
         print(f"  Всего файлов: {len(files)}")
+        print(f"  Исключено (дубликаты/повреждённые): {len(excluded)}")
         print(f"  Новых/изменённых: {len(files_to_process)}")
-        print(f"  Уже есть в кэше: {len(files) - len(files_to_process)}")
+        print(f"  Уже есть в кэше: {len(files) - len(files_to_process) - len(excluded)}")
     else:
-        files_to_process = files
+        # В полном режиме обрабатываем ВСЕ файлы, включая дубликаты и повреждённые
+        files_to_process = files[:]
         print("Полный режим: пересчёт всех хэшей")
+        print(f"  Всего файлов для обработки: {len(files_to_process)}")
 
     # Если нет файлов для обработки, показываем прогресс 100% и возвращаем существующие группы
     if not files_to_process:
@@ -591,15 +597,17 @@ def run(move_to=None, progress_callback=None, incremental=True):
 
     print_stats(similar, files, failed_paths, failed_reasons)
 
+    # Пересчитываем статистику из БД (чтобы учитывать только сохранённые записи)
+    saved_groups = database.load_dedup_groups() or []
     total_files = len(files)
-    similar_files = sum(len(group) for group in similar)
-    similar_dup_files = sum(len(group) - 1 for group in similar)
+    similar_files = sum(len(group) for group in saved_groups)
+    similar_dup_files = sum(len(group) - 1 for group in saved_groups)
 
     print("\n" + "=" * 60)
     print("ИТОГ")
     print("=" * 60)
     print("Обработано файлов: %d" % total_files)
-    print("Похожих изображений: %d файлов в %d группах" % (similar_files, len(similar)))
+    print("Похожих изображений: %d файлов в %d группах" % (similar_files, len(saved_groups)))
     print("  (из них дубликаты для удаления: %d)" % similar_dup_files)
     if failed_paths:
         print("Повреждённых/недоступных: %d файлов" % len(failed_paths))

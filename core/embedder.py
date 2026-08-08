@@ -22,7 +22,10 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 import config
 from core import database
-from core.scanner import load_index
+from core.scanner import load_index, STOP_REQUESTED
+
+# Singleton instance для эмбеддера
+_embedder_instance = None
 
 
 class SiglipEmbedder:
@@ -63,7 +66,7 @@ class SiglipEmbedder:
                 img = img.convert("RGBA").convert("RGB")
             return img
 
-    def embed_paths(self, paths, batch_size=None, progress_callback=None):
+    def embed_paths(self, paths, batch_size=None, progress_callback=None, batch_save_callback=None):
         if batch_size is None:
             batch_size = config.EMBED_BATCH_SIZE
 
@@ -71,6 +74,9 @@ class SiglipEmbedder:
         valid_paths = []
         n = len(paths)
         for i in range(0, n, batch_size):
+            if STOP_REQUESTED:
+                print("\nОстановка по запросу пользователя.")
+                break
             batch_paths = paths[i:i + batch_size]
             images = []
             batch_valid = []
@@ -86,6 +92,7 @@ class SiglipEmbedder:
                     progress_callback("embed", min(i + batch_size, n), n, "Генерация эмбеддингов")
                 continue
 
+            batch_embeddings = []
             try:
                 # SigLIP2 — мультимодальная модель: используем непустой текст-заглушку.
                 inputs = self.processor(
@@ -97,6 +104,7 @@ class SiglipEmbedder:
                 with torch.no_grad():
                     outputs = self.model(**inputs)
                 emb = outputs.image_embeds.cpu().numpy()
+                batch_embeddings.append(emb)
                 embeddings.append(emb)
                 valid_paths.extend(batch_valid)
             except Exception as e:
@@ -114,10 +122,18 @@ class SiglipEmbedder:
                         with torch.no_grad():
                             outputs = self.model(**inputs)
                         emb = outputs.image_embeds.cpu().numpy()
+                        batch_embeddings.append(emb)
                         embeddings.append(emb)
                         valid_paths.append(p)
                     except Exception:
                         continue
+
+            # Сохраняем обработанный батч в БД сразу (для устойчивости к прерыванию)
+            if batch_embeddings and batch_save_callback is not None:
+                try:
+                    batch_save_callback(np.vstack(batch_embeddings), batch_valid)
+                except Exception as e:
+                    print("\nОшибка сохранения батча в БД: %s" % e)
 
             if progress_callback is not None:
                 progress_callback("embed", min(i + batch_size, n), n, "Генерация эмбеддингов")
@@ -138,8 +154,11 @@ def _progress(current, total, label="Обработка"):
         sys.stdout.flush()
 
 
-def get_embedder():
-    return SiglipEmbedder()
+def get_embedder() -> SiglipEmbedder:
+    global _embedder_instance
+    if _embedder_instance is None:
+        _embedder_instance = SiglipEmbedder()
+    return _embedder_instance
 
 
 def run(progress_callback=None, incremental=True):
@@ -152,11 +171,12 @@ def run(progress_callback=None, incremental=True):
     # Текущий mtime для каждого файла (из индекса)
     current_mtime_map = {f["path"]: f.get("mtime", 0) for f in files}
 
-    dup_paths = database.load_duplicate_paths() or set()
-    failed_paths = database.load_failed_paths() or set()
-    excluded = dup_paths | failed_paths
-
     if incremental:
+        # В инкрементальном режиме исключаем дубликаты и повреждённые файлы
+        dup_paths = database.load_duplicate_paths() or set()
+        failed_paths = database.load_failed_paths() or set()
+        excluded = dup_paths | failed_paths
+        
         # Загружаем существующие эмбеддинги с mtime
         existing_embeddings, existing_embed_paths, existing_mtime = database.load_embeddings_with_mtime()
         existing_embed_set = set(existing_embed_paths) if existing_embed_paths else set()
@@ -181,22 +201,47 @@ def run(progress_callback=None, incremental=True):
         print(f"  Уже есть эмбеддинги: {len(existing_embed_set)}")
         print(f"  Нужно вычислить: {len(paths_to_embed)}")
     else:
-        paths_to_embed = [p for p in all_paths if p not in excluded]
+        # В полном режиме обрабатываем ВСЕ файлы, включая дубликаты и повреждённые
+        paths_to_embed = all_paths[:]
         print("Полный режим: пересчёт всех эмбеддингов")
+        print(f"  Всего файлов для обработки: {len(paths_to_embed)}")
 
     if not paths_to_embed:
         print("Нет файлов для обработки.")
         return None
 
-    print(f"Загрузка модели {config.SIGLIP_MODEL}...")
+    # Модель уже загружена через preload_model() в app_flet.py
     t0 = time.time()
     embedder = get_embedder()
-    print(f"Модель загружена за {time.time() - t0:.1f} с")
+    if embedder.device == "cuda":
+        print(f"Модель готова (CUDA), время инициализации: {time.time() - t0:.1f} с")
+    else:
+        print(f"Модель готова (CPU), время инициализации: {time.time() - t0:.1f} с")
+
+    # При полном режиме очищаем таблицу embeddings перед началом,
+    # чтобы батчи сохранялись с нуля (без старых записей).
+    if not incremental:
+        database.save_embeddings(np.zeros((0, 0)), [], {}, incremental=False)
+
+    # Callback для сохранения каждого обработанного батча в БД сразу.
+    # Это обеспечивает устойчивость к прерыванию: при остановке/закрытии
+    # уже обработанные файлы не будут пересчитываться при следующем запуске.
+    def batch_save_callback(batch_vectors, batch_paths):
+        batch_mtime = {p: current_mtime_map.get(p, 0) for p in batch_paths}
+        database.save_embeddings(batch_vectors, batch_paths, batch_mtime, incremental=True)
 
     print(f"Эмбеддинг {len(paths_to_embed)} изображений...")
     t0 = time.time()
-    embeddings, valid_paths = embedder.embed_paths(paths_to_embed, progress_callback=progress_callback)
+    embeddings, valid_paths = embedder.embed_paths(
+        paths_to_embed,
+        progress_callback=progress_callback,
+        batch_save_callback=batch_save_callback,
+    )
     elapsed = time.time() - t0
+
+    if STOP_REQUESTED:
+        print("\nВычисление эмбеддингов остановлено. Уже обработанные батчи сохранены в БД.")
+        return None
 
     if len(valid_paths) != len(paths_to_embed):
         print(f"Пропущено повреждённых файлов: {len(paths_to_embed) - len(valid_paths)}")
@@ -238,9 +283,9 @@ def run(progress_callback=None, incremental=True):
         # mtime: старые + обновлённые/новые
         final_mtime = dict(existing_mtime) if existing_mtime else {}
         final_mtime.update(new_mtime_map)
-        database.save_embeddings(final_embeddings, final_paths, final_mtime)
+        database.save_embeddings(final_embeddings, final_paths, final_mtime, incremental=True)
     else:
-        database.save_embeddings(embeddings, valid_paths, new_mtime_map)
+        database.save_embeddings(embeddings, valid_paths, new_mtime_map, incremental=False)
 
     print(f"\nОбработано изображений: {len(valid_paths)}")
     if embeddings.shape[0] > 0:

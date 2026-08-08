@@ -104,6 +104,14 @@ def run_hash_search(image_path, top_k=None):
 # ============================================================
 
 
+# Кэш для индекса и эмбеддингов (чтобы не перестраивать при каждом поиске)
+_cache = {
+    "embeddings": None,
+    "paths": None,
+    "index": None,
+}
+
+
 def build_index(embeddings):
     emb = embeddings.astype("float32")
     faiss.normalize_L2(emb)
@@ -125,37 +133,56 @@ def embed_query(embedder, text):
 def run(query, top_k=None, threshold=None):
     """Семантический поиск.
 
-    Возвращает все результаты с близостью >= threshold, отсортированные
-    по убыванию близости (самый близкий — первый). Если threshold равен None,
-    используется config.SEARCH_THRESHOLD. Если threshold == 0.0, возвращаются
-    все top_k результатов.
+    Возвращает результаты, близость которых попадает в интервал
+    [best - threshold, best], где best — максимальная близость среди
+    найденных. Результаты отсортированы по убыванию близости
+    (самый близкий — первый). Если threshold равен None,
+    используется config.SEARCH_THRESHOLD. Если threshold == 0.0,
+    возвращаются все top_k результатов.
     """
     if top_k is None:
         top_k = config.SEARCH_TOP_K
     if threshold is None:
         threshold = config.SEARCH_THRESHOLD
 
-    embeddings, paths = load_embeddings()
-    if embeddings is None:
-        print("Эмбеддинги не найдены. Сначала выполните: python main.py embed")
-        return []
+    # Кэшируем эмбеддинги и индекс, чтобы не перестраивать при каждом поиске
+    if _cache["embeddings"] is None or _cache["paths"] is None:
+        embeddings, paths = load_embeddings()
+        if embeddings is None:
+            print("Эмбеддинги не найдены. Сначала выполните: python main.py embed")
+            return []
+        _cache["embeddings"] = embeddings
+        _cache["paths"] = paths
+    else:
+        embeddings = _cache["embeddings"]
+        paths = _cache["paths"]
+
+    if _cache["index"] is None:
+        print("Построение FAISS-индекса...")
+        _cache["index"] = build_index(embeddings)
 
     print("Поиск: \"%s\"" % query)
     embedder = get_embedder()
     q = embed_query(embedder, query)
-    index = build_index(embeddings)
+    index = _cache["index"]
 
     top_k = min(top_k, len(paths))
     scores, indices = index.search(q, top_k)
 
-    # Фильтруем по порогу близости
-    results = []
+    # Собираем все результаты
+    all_results = []
     for score, idx in zip(scores[0], indices[0]):
         if idx >= len(paths):
             continue
-        if threshold > 0.0 and score < threshold:
-            continue
-        results.append((paths[idx], float(score)))
+        all_results.append((paths[idx], float(score)))
+
+    # Фильтруем по интервалу [best - threshold, best]
+    if threshold > 0.0 and all_results:
+        best = all_results[0][1]
+        min_score = best - threshold
+        results = [(p, s) for p, s in all_results if s >= min_score]
+    else:
+        results = all_results
 
     print("\nНайдено результатов: %d" % len(results))
     for i, (path, score) in enumerate(results):

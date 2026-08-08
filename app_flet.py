@@ -239,11 +239,13 @@ class ImageDedupApp:
     def on_window_event(self, e):
         """Обработчик событий окна — при закрытии останавливаем фоновые вычисления."""
         if e.data == ft.WindowEventType.CLOSE:
-            print("Закрытие окна: останавливаем фоновые вычисления...")
             scanner.STOP_REQUESTED = True
             self.scanning = False
-            # Гарантированно завершаем процесс, убивая фоновые потоки
-            os._exit(0)
+            # Даём фоновым потокам сигнал остановки и выходим.
+            # os._exit может прервать запись в SQLite; sys.exit позволяет
+            # Python-сборщику мусора корректно закрыть соединения.
+            import sys as _sys
+            _sys.exit(0)
 
     def on_window_resize(self, e):
         """Обработчик изменения размера окна - пересоздаём галерею"""
@@ -432,21 +434,10 @@ class ImageDedupApp:
 
     def _save_current_gallery_scroll(self):
         """Сохранить scroll offset текущей галереи"""
-        try:
-            if hasattr(self, 'tab_content') and self.tab_content.content:
-                gallery = self._find_gallery(self.tab_content.content)
-                if gallery:
-                    scroll_key = f"gallery_scroll_{self.current_gallery_scope}"
-                    # Если offset уже сохранён из события скролла — не перезаписываем
-                    existing = getattr(self.page.session, scroll_key, None)
-                    if existing is None or not isinstance(existing, (int, float)) or existing <= 0:
-                        # В Flet 0.86.5 нет scroll_offset на GridView,
-                        # используем offset из transform (если задан)
-                        offset = getattr(gallery, 'offset', None)
-                        if offset is not None and hasattr(offset, 'y'):
-                            setattr(self.page.session, scroll_key, offset.y)
-        except Exception:
-            pass
+        # Flet GridView не предоставляет прямой доступ к scroll offset.
+        # Scroll position уже сохраняется в обработчике on_scroll
+        # (create_scroll_handler), поэтому здесь ничего не делаем.
+        pass
 
     def _restore_gallery_scroll(self, gallery, scope, paths=None, page_size=None):
         """Восстановить scroll offset галереи"""
@@ -526,13 +517,29 @@ class ImageDedupApp:
             traceback.print_exc()
     
     def _get_available_disks(self):
-        """Возвращает список доступных дисков на Windows (C:\, D:\ и т.д.)"""
-        disks = []
-        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-            path = f"{letter}:\\"
-            if os.path.exists(path):
-                disks.append(path)
-        return disks
+        """Возвращает список доступных дисков/точек монтирования.
+
+        На Windows проверяет буквы дисков (C:\\, D:\\, ...).
+        На macOS/Linux возвращает корневые точки монтирования.
+        """
+        if sys.platform == "win32":
+            disks = []
+            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                path = f"{letter}:\\"
+                if os.path.exists(path):
+                    disks.append(path)
+            return disks
+        else:
+            # macOS/Linux: / и /Volumes/* (macOS дополнительно монтирует
+            # внешние диски в /Volumes)
+            disks = ["/"]
+            volumes = "/Volumes"
+            if os.path.isdir(volumes):
+                for name in os.listdir(volumes):
+                    full = os.path.join(volumes, name)
+                    if os.path.isdir(full):
+                        disks.append(full)
+            return disks
 
     async def toggle_scan(self, e):
         """Запуск/остановка сканирования"""
@@ -622,16 +629,13 @@ class ImageDedupApp:
 
             # Обновляем статистику после дедупликации (дубликаты уже сохранены в БД)
             self.load_stats()
-            print(f"[DEBUG] После дедупликации: всего={self.stat_total.value}, дублей={self.stat_duplicates.value}, уник={self.stat_unique.value}")
 
             # 3. Эмбеддинги
             self.progress_text.value = "Эмбеддинги..."
             self.progress_bar.value = 0
             self.page.update()
             
-            print("[DEBUG] Запуск embedder.run...")
             result = await asyncio.to_thread(embedder.run, incremental=True, progress_callback=self._progress_callback)
-            print(f"[DEBUG] embedder.run вернул: {result}")
             
             if scanner.STOP_REQUESTED:
                 return
@@ -642,9 +646,7 @@ class ImageDedupApp:
                 self.progress_bar.value = 0
                 self.page.update()
                 
-                print("[DEBUG] Запуск clustererhdb.run...")
                 await asyncio.to_thread(clustererhdb.run, progress_callback=self._progress_callback)
-                print("[DEBUG] clustererhdb.run завершён")
                 
                 if scanner.STOP_REQUESTED:
                     return
@@ -876,9 +878,12 @@ class ImageDedupApp:
                 continue
             cluster_folder = dest_path / f"Категория_{cluster_id}"
             cluster_folder.mkdir(parents=True, exist_ok=True)
+            used_names = set()
             for file_path in files:
                 try:
-                    shutil.copy2(file_path, cluster_folder / Path(file_path).name)
+                    dst = _unique_path(cluster_folder, Path(file_path).name, used_names)
+                    shutil.copy2(file_path, dst)
+                    used_names.add(dst.name)
                     total_copied += 1
                 except Exception as ex:
                     print(f"Ошибка копирования {file_path}: {ex}")
@@ -887,9 +892,12 @@ class ImageDedupApp:
         if unclustered:
             unclustered_folder = dest_path / "Без_категории"
             unclustered_folder.mkdir(parents=True, exist_ok=True)
+            used_names = set()
             for file_path in unclustered:
                 try:
-                    shutil.copy2(file_path, unclustered_folder / Path(file_path).name)
+                    dst = _unique_path(unclustered_folder, Path(file_path).name, used_names)
+                    shutil.copy2(file_path, dst)
+                    used_names.add(dst.name)
                     total_copied += 1
                 except Exception as ex:
                     print(f"Ошибка копирования {file_path}: {ex}")
@@ -898,21 +906,19 @@ class ImageDedupApp:
 
     def show_clusters_tab(self):
         """Показать вкладку 'Категории'"""
-        print(f"[DEBUG] show_clusters_tab called, clusters count={len(self.clusters)}")
         if not self.clusters:
-            print(f"[DEBUG] No clusters, showing placeholder")
             self.tab_content.content = ft.Text("Категории ещё не созданы. Запустите полный цикл.")
             self.page.update()
             return
         
         # Получить выбранную категорию
-        if self.active_cluster_id is not None:
+        # Проверяем, что active_cluster_id всё ещё существует в clusters
+        # (после повторной кластеризации старые ID могут исчезнуть)
+        if self.active_cluster_id is not None and self.active_cluster_id in self.clusters:
             cluster_id = self.active_cluster_id
         else:
             cluster_id = sorted(self.clusters.keys())[0]
             self.active_cluster_id = cluster_id
-        
-        print(f"[DEBUG] Showing cluster {cluster_id}")
         
         # Обновляем подсветку кнопок
         self.update_clusters_list()
@@ -921,14 +927,12 @@ class ImageDedupApp:
         # Сортируем для стабильного порядка
         members.sort()
         
-        print(f"[DEBUG] Cluster {cluster_id} has {len(members)} members")
-        
         # Кнопка "Выбрать/Снять все" с интерактивной иконкой
         selection_state = self.get_selection_state(members)
         self.cluster_select_all_icon_button = ft.IconButton(
             icon=self.get_checkbox_icon(selection_state),
             tooltip="Выбрать/Снять все",
-            on_click=lambda: self.toggle_select_all(members),
+            on_click=lambda e: self.toggle_select_all(members),
         )
         
         # Счётчик выбранных
@@ -954,9 +958,7 @@ class ImageDedupApp:
             [controls_row, ft.Divider(), gallery],
             expand=True,
         )
-        print(f"[DEBUG] tab_content updated, calling page.update()")
         self.page.update()
-        print(f"[DEBUG] Restoring gallery scroll for cluster_{cluster_id}")
         self._restore_gallery_scroll(gallery, f"cluster_{cluster_id}", members, 100)
     
     def show_search_tab(self):
@@ -1157,10 +1159,8 @@ class ImageDedupApp:
 
     def create_gallery(self, paths: list, scope: str):
         """Создание галереи с lazy loading"""
-        print(f"[DEBUG] create_gallery called with {len(paths) if paths else 0} paths, scope={scope}")
         # Validate paths
         if not paths or not isinstance(paths, list):
-            print(f"[DEBUG] No paths or invalid paths list")
             return ft.Column([ft.Text("Нет изображений")])
         
         # Загружаем выделение из БД
@@ -1194,7 +1194,6 @@ class ImageDedupApp:
             page_paths = paths[:page_size]
             offset = 0
         
-        print(f"[DEBUG] Creating GridView with {len(page_paths)} initial items")
         
         # Создаём GridView
         gallery = ft.GridView(
@@ -1213,7 +1212,6 @@ class ImageDedupApp:
                 self._make_gallery_item(path, scope, gallery, path_to_cluster)
             )
         
-        print(f"[DEBUG] Gallery created with {len(gallery.controls)} controls")
         return gallery
     
     def create_scroll_handler(self, paths: list, scope: str, page_size: int):
@@ -1437,9 +1435,8 @@ class ImageDedupApp:
         )
         
         def close_dialog(e):
-            if hasattr(self.page, 'dialog') and self.page.dialog:
-                self.page.dialog.open = False
-                self.page.update()
+            dialog.open = False
+            self.page.update()
         
         def zoom_in(e):
             preview_image.width = min(preview_image.width * 1.2, 1200)
@@ -1530,24 +1527,27 @@ class ImageDedupApp:
             modal=True,
         )
         
-        self.page.dialog = dialog
-        self.page.show_dialog(dialog)
+        self.page.open(dialog)
     
     def show_context_menu(self, path: str, local_position=None):
         """Показать контекстное меню при правом клике на изображение"""
-        print(f"[DEBUG] show_context_menu called for {path}, position={local_position}")
         
         def open_preview(e):
-            print(f"[DEBUG] open_preview clicked for {path}")
             self.page.update()
             self.show_preview(path)
         
         def open_location(e):
-            print(f"[DEBUG] open_location clicked for {path}")
             self.page.update()
             folder = os.path.dirname(path)
             if os.path.exists(folder):
-                os.startfile(folder)
+                import subprocess
+                import sys as _sys
+                if _sys.platform == "win32":
+                    os.startfile(folder)
+                elif _sys.platform == "darwin":
+                    subprocess.Popen(["open", folder])
+                else:
+                    subprocess.Popen(["xdg-open", folder])
         
         # Создаём контейнер для позиционирования меню
         menu_container = ft.Container(
@@ -1575,7 +1575,6 @@ class ImageDedupApp:
         
         # Открываем меню
         menu_container.content.open = True
-        print(f"[DEBUG] Opening context menu popup for {path} at position ({menu_container.left}, {menu_container.top})")
         self.page.update()
     
     def browse_destination_folder(self, text_field: ft.TextField):
@@ -1610,6 +1609,19 @@ class ImageDedupApp:
         all_selected = all(p in self.selected_images for p in paths)
         self.select_all(paths, not all_selected)
     
+def _unique_path(folder, name, used_names):
+    """Возвращает путь с уникальным именем, избегая коллизий."""
+    if name not in used_names and not (folder / name).exists():
+        return folder / name
+    stem, suffix = os.path.splitext(name)
+    i = 1
+    while True:
+        candidate = f"{stem}_{i}{suffix}"
+        if candidate not in used_names and not (folder / candidate).exists():
+            return folder / candidate
+        i += 1
+
+
 def main():
     ft.app(
         target=ImageDedupApp,

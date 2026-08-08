@@ -609,7 +609,7 @@ def clear_all():
     """Полностью очищает все таблицы БД."""
     conn = _get_conn()
     try:
-        for table in ["images", "image_hashes", "embeddings", "clusters", "dedup_groups", "failed_files"]:
+        for table in ["images", "image_hashes", "embeddings", "clusters", "dedup_groups", "failed_files", "selected_files"]:
             conn.execute("DELETE FROM %s" % table)
         conn.commit()
     finally:

@@ -5,6 +5,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from PIL import Image as PILImage
 import config
 from core import database, scanner, dedup, embedder, clustererhdb, search, thumbnail_cache
 
@@ -76,6 +77,18 @@ class ImageDedupApp:
 
         # Обработчик закрытия окна — останавливаем фоновые вычисления
         self.page.window.on_event = self.on_window_event
+        
+        # Состояние модального превью
+        self._preview_dialog = None
+        self._preview_dialog_content = None
+        self._preview_paths = []
+        self._preview_idx = 0
+        self._preview_image = None
+        self._preview_path_text = None
+        self._preview_counter_text = None
+        
+        # Глобальные клавиатурные сокращения для превью
+        self.page.on_keyboard_event = self._on_preview_keyboard
     
     def create_layout(self):
         """Создание основного layout"""
@@ -249,7 +262,6 @@ class ImageDedupApp:
 
     def on_window_resize(self, e):
         """Обработчик изменения размера окна - пересоздаём галерею"""
-        # Сохраняем текущий offset
         self._save_current_gallery_scroll()
         current_tab = self.current_tab
         if current_tab == -1:
@@ -261,13 +273,15 @@ class ImageDedupApp:
         else:
             return
         
-        # Пересоздаём текущую вкладку
         if current_tab == -1:
             asyncio.create_task(self.show_clusters_tab())
         elif current_tab == 0:
             self.show_search_tab()
         elif current_tab == 1:
             asyncio.create_task(self.show_export_tab())
+        
+        if self._preview_dialog is not None and self._preview_dialog.open:
+            self._update_preview_size()
     
     def create_scan_section(self):
         """Секция сканирования"""
@@ -1470,129 +1484,403 @@ class ImageDedupApp:
         elif self.current_tab == 1:
             asyncio.create_task(self.show_export_tab())
     
+    def _clear_preview_state(self):
+        self._preview_paths = []
+        self._preview_idx = 0
+        self._preview_image = None
+        self._preview_image_container = None
+        self._preview_stack = None
+        self._preview_scale = 1.0
+        self._preview_pan_x = 0.0
+        self._preview_pan_y = 0.0
+        self._preview_base_w = 800
+        self._preview_base_h = 600
+        self._preview_path_text = None
+        self._preview_counter_text = None
+        self._preview_click_start_x = 0.0
+        self._preview_panning = False
+        self._preview_pan_distance = 0.0
+        self._preview_last_pan_x = 0.0
+        self._preview_last_pan_y = 0.0
+        self._preview_current_path = None
+
+    def _get_image_size(self, path: str):
+        """Возвращает (width, height) изображения или None."""
+        try:
+            from PIL import Image as PILImage
+            with PILImage.open(path) as img:
+                return img.size
+        except Exception:
+            return None
+
+    def _calc_preview_size(self, image_size=None):
+        w = getattr(self.page, 'width', 1200) or 1200
+        h = getattr(self.page, 'height', 800) or 800
+        max_w = max(400, w - 80)
+        max_h = max(300, h - 140)
+        limit_w = min(1000, max_w)
+        limit_h = min(800, max_h)
+        if image_size is not None:
+            img_w, img_h = image_size
+            if img_w > 0 and img_h > 0:
+                scale = min(limit_w / img_w, limit_h / img_h, 1.0)
+                return max(300, int(img_w * scale)), max(220, int(img_h * scale))
+        return limit_w, limit_h
+
+    def _update_preview_size(self):
+        if self._preview_dialog is None or not self._preview_dialog.open:
+            return
+        image_size = self._get_image_size(self._preview_current_path) if self._preview_current_path else None
+        new_w, new_h = self._calc_preview_size(image_size)
+        self._preview_base_w = new_w
+        self._preview_base_h = new_h
+        if self._preview_image is not None:
+            self._preview_image.width = new_w * self._preview_scale
+            self._preview_image.height = new_h * self._preview_scale
+        if self._preview_stack is not None:
+            self._preview_stack.width = new_w
+            self._preview_stack.height = new_h
+        if self._preview_dialog_content is not None:
+            self._preview_dialog_content.content.width = new_w + 16
+            self._preview_dialog_content.content.height = new_h + 52
+        self.page.update()
+
+    def _on_preview_dismissed(self, e):
+        self._preview_dialog = None
+        self._clear_preview_state()
+        self.page.on_secondary_tap = None
+        self.page.update()
+
+    def _open_file_location(self, path: str):
+        import subprocess
+        import sys as _sys
+        import threading
+        import time
+        folder = os.path.dirname(path)
+        if _sys.platform == "win32":
+            norm = os.path.normpath(os.path.abspath(path))
+            try:
+                import ctypes
+                ctypes.windll.shell32.ShellExecuteW(
+                    None,
+                    "open",
+                    "explorer.exe",
+                    f"/select,{norm}",
+                    None,
+                    1,
+                )
+            except Exception:
+                subprocess.Popen(["explorer.exe", f"/select,{norm}"])
+            def _ensure_visible():
+                time.sleep(1.0)
+                try:
+                    import win32gui
+                    import win32con
+                    import win32api
+                    found = []
+                    def cb(hwnd, extra):
+                        if win32gui.IsWindowVisible(hwnd):
+                            cls = win32gui.GetClassName(hwnd)
+                            if cls in ("CabinetWClass", "ExploreWClass"):
+                                found.append(hwnd)
+                        return True
+                    win32gui.EnumWindows(cb, None)
+                    if found:
+                        hwnd = found[-1]
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                        win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_F5, 0)
+                        win32api.SendMessage(hwnd, win32con.WM_KEYUP, win32con.VK_F5, 0)
+                        win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_F6, 0)
+                        win32api.SendMessage(hwnd, win32con.WM_KEYUP, win32con.VK_F6, 0)
+                except Exception:
+                    pass
+            threading.Thread(target=_ensure_visible, daemon=True).start()
+        elif _sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+
+    def _navigate_preview(self, delta):
+        paths = self._preview_paths
+        if not paths:
+            return
+        self._preview_idx = (self._preview_idx + delta) % len(paths)
+        new_path = paths[self._preview_idx]
+        self._preview_current_path = new_path
+        self._preview_image.src = new_path
+        self._preview_scale = 1.0
+        self._preview_pan_x = 0.0
+        self._preview_pan_y = 0.0
+        self._preview_image.width = self._preview_base_w
+        self._preview_image.height = self._preview_base_h
+        self._preview_image_container.left = 0
+        self._preview_image_container.top = 0
+        if self._preview_path_text is not None:
+            self._preview_path_text.value = new_path
+            self._preview_path_text.tooltip = new_path
+        self.page.update()
+
+    def _zoom_preview(self, factor, cx=None, cy=None):
+        if cx is None:
+            cx = self._preview_base_w / 2.0
+        if cy is None:
+            cy = self._preview_base_h / 2.0
+        old_scale = self._preview_scale
+        new_scale = max(0.5, min(5.0, old_scale * factor))
+        if old_scale == new_scale:
+            return
+        self._preview_pan_x = cx - (cx - self._preview_pan_x) * (new_scale / old_scale)
+        self._preview_pan_y = cy - (cy - self._preview_pan_y) * (new_scale / old_scale)
+        self._preview_scale = new_scale
+        self._preview_image.width = self._preview_base_w * new_scale
+        self._preview_image.height = self._preview_base_h * new_scale
+        self._preview_image_container.left = self._preview_pan_x
+        self._preview_image_container.top = self._preview_pan_y
+        self.page.update()
+
+    def _reset_preview_zoom(self):
+        self._preview_scale = 1.0
+        self._preview_pan_x = 0.0
+        self._preview_pan_y = 0.0
+        self._preview_image.width = self._preview_base_w
+        self._preview_image.height = self._preview_base_h
+        self._preview_image_container.left = 0
+        self._preview_image_container.top = 0
+        self.page.update()
+
+    def _on_preview_keyboard(self, e: ft.KeyboardEvent):
+        dlg = self._preview_dialog
+        if dlg is None or not dlg.open:
+            return
+        key = e.key
+        if key == "Escape":
+            dlg.open = False
+            self._preview_dialog = None
+            self._clear_preview_state()
+            self.page.update()
+        elif key == "Arrow Left":
+            self._navigate_preview(-1)
+        elif key == "Arrow Right":
+            self._navigate_preview(1)
+        elif key in ("+", "=", "Equal"):
+            self._zoom_preview(1.2)
+        elif key == "-" or key == "Minus":
+            self._zoom_preview(1 / 1.2)
+        elif key in ("0", "Digit0", "Numpad 0"):
+            self._reset_preview_zoom()
+
     def show_preview(self, path: str):
-        """Показать preview изображения с зумом, навигацией и полным путём."""
-        # Список путей текущей галереи для навигации
         paths = self.current_gallery_paths or [path]
         if path not in paths:
             paths = [path] + paths
         current_idx = paths.index(path) if path in paths else 0
-        
+
+        image_size = self._get_image_size(path)
+        base_w, base_h = self._calc_preview_size(image_size)
+
         preview_image = ft.Image(
             src=path,
             fit="contain",
-            width=800,
-            height=600,
+            width=base_w,
+            height=base_h,
         )
-        
+
+        image_container = ft.Container(
+            content=preview_image,
+            left=0,
+            top=0,
+        )
+
+        stack = ft.Stack(
+            [image_container],
+            width=base_w,
+            height=base_h,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+
+        self._preview_paths = paths
+        self._preview_idx = current_idx
+        self._preview_current_path = paths[current_idx] if paths else path
+        self._preview_image = preview_image
+        self._preview_image_container = image_container
+        self._preview_stack = stack
+        self._preview_base_w = base_w
+        self._preview_base_h = base_h
+        self._preview_scale = 1.0
+        self._preview_pan_x = 0.0
+        self._preview_pan_y = 0.0
+        self._preview_click_start_x = 0.0
+        self._preview_panning = False
+        self._preview_pan_distance = 0.0
+        self._preview_last_pan_x = 0.0
+        self._preview_last_pan_y = 0.0
+
         path_text = ft.Text(
             path,
             size=12,
-            color=ft.Colors.ON_SURFACE_VARIANT,
-            selectable=True,
+            color=ft.Colors.with_opacity(0.8, ft.Colors.ON_SURFACE_VARIANT),
             text_align=ft.TextAlign.CENTER,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
         )
-        
-        counter_text = ft.Text(
-            f"{current_idx + 1} / {len(paths)}",
-            size=12,
-            color=ft.Colors.ON_SURFACE_VARIANT,
-        )
-        
-        def close_dialog(e):
-            dialog.open = False
-            self.page.update()
-        
-        def zoom_in(e):
-            preview_image.width = min(preview_image.width * 1.2, 1200)
-            preview_image.height = min(preview_image.height * 1.2, 900)
-            self.page.update()
-        
-        def zoom_out(e):
-            preview_image.width = max(preview_image.width / 1.2, 200)
-            preview_image.height = max(preview_image.height / 1.2, 150)
-            self.page.update()
-        
-        def reset_zoom(e):
-            preview_image.width = 800
-            preview_image.height = 600
-            self.page.update()
-        
-        def navigate(delta):
-            nonlocal current_idx
-            if not paths:
+        self._preview_path_text = path_text
+
+        def on_tap_down(e):
+            lp = e.local_position
+            self._preview_click_start_x = lp.x if lp else base_w / 2
+            self._preview_panning = False
+            self._preview_pan_distance = 0.0
+
+        def on_pan_start(e):
+            lp = e.local_position
+            self._preview_last_pan_x = lp.x if lp else 0.0
+            self._preview_last_pan_y = lp.y if lp else 0.0
+
+        def on_pan_update(e):
+            lp = e.local_position
+            if lp is None:
                 return
-            current_idx = (current_idx + delta) % len(paths)
-            new_path = paths[current_idx]
-            preview_image.src = new_path
-            path_text.value = new_path
-            counter_text.value = f"{current_idx + 1} / {len(paths)}"
-            reset_zoom(None)
+            dx = lp.x - self._preview_last_pan_x
+            dy = lp.y - self._preview_last_pan_y
+            self._preview_last_pan_x = lp.x
+            self._preview_last_pan_y = lp.y
+            if abs(dx) > 1 or abs(dy) > 1:
+                self._preview_panning = True
+            self._preview_pan_distance += abs(dx) + abs(dy)
+            self._preview_pan_x += dx
+            self._preview_pan_y += dy
+            image_container.left = self._preview_pan_x
+            image_container.top = self._preview_pan_y
             self.page.update()
-        
-        def prev(e):
-            navigate(-1)
-        
-        def next(e):
-            navigate(1)
-        
-        # Оборачиваем изображение в GestureDetector для поддержки двойного клика в десктопе
-        # on_double_tap - двойной клик для увеличения
-        preview_with_gesture = ft.GestureDetector(
-            content=preview_image,
-            on_double_tap=zoom_in,
+
+        def on_pan_end(e):
+            self._preview_panning = False
+
+        def on_scroll(e):
+            sd = e.scroll_delta
+            if hasattr(sd, 'dy'):
+                sd = sd.dy
+            elif hasattr(sd, 'y'):
+                sd = sd.y
+            else:
+                sd = float(sd)
+            if sd == 0:
+                return
+            factor = 1.1 if sd > 0 else 1 / 1.1
+            lp = e.local_position
+            cx = lp.x if lp else base_w / 2.0
+            cy = lp.y if lp else base_h / 2.0
+            self._zoom_preview(factor, cx, cy)
+
+        def on_tap(e):
+            if not self._preview_panning or self._preview_pan_distance < 10:
+                nav = -1 if self._preview_click_start_x < base_w / 2 else 1
+                self._navigate_preview(nav)
+
+        def on_secondary_tap(e):
+            if self._preview_dialog is not None and self._preview_dialog.open:
+                self._preview_dialog.open = False
+                self._on_preview_dismissed(None)
+
+        def on_dialog_secondary_tap(e):
+            if self._preview_dialog is not None and self._preview_dialog.open:
+                self._preview_dialog.open = False
+                self._on_preview_dismissed(None)
+
+        preview_gesture = ft.GestureDetector(
+            content=stack,
+            on_tap_down=on_tap_down,
+            on_pan_start=on_pan_start,
+            on_pan_update=on_pan_update,
+            on_pan_end=on_pan_end,
+            on_scroll=on_scroll,
+            on_tap=on_tap,
         )
-        
-        dialog = ft.AlertDialog(
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.IconButton(
-                                icon=ft.Icons.CLOSE,
-                                tooltip="Закрыть",
-                                on_click=close_dialog,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.ARROW_BACK,
-                                tooltip="Назад",
-                                on_click=prev,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.ARROW_FORWARD,
-                                tooltip="Вперёд",
-                                on_click=next,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.ZOOM_IN,
-                                tooltip="Увеличить",
-                                on_click=zoom_in,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.ZOOM_OUT,
-                                tooltip="Уменьшить",
-                                on_click=zoom_out,
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.RESTORE,
-                                tooltip="Сбросить",
-                                on_click=reset_zoom,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                    ),
-                    counter_text,
-                    preview_with_gesture,
-                    path_text,
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=10,
-                scroll=ft.ScrollMode.AUTO,
+
+        dialog_w, dialog_h = self._calc_preview_size(image_size)
+        path_text = ft.Text(
+            path,
+            size=11,
+            color=ft.Colors.with_opacity(0.85, ft.Colors.ON_SURFACE_VARIANT),
+            text_align=ft.TextAlign.CENTER,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._preview_path_text = path_text
+        path_text_container = ft.GestureDetector(
+            content=ft.Container(
+                content=ft.Row(
+                    [
+                        path_text,
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
+                padding=6,
+                border_radius=6,
+                on_click=lambda e: (
+                    self._open_file_location(self._preview_current_path)
+                    if self._preview_current_path and os.path.exists(self._preview_current_path)
+                    else None
+                ),
+                tooltip="Открыть расположение файла",
             ),
-            modal=True,
+            on_secondary_tap=lambda e: (
+                self._on_preview_dismissed(None)
+                if self._preview_dialog is not None and self._preview_dialog.open
+                else None
+            ),
         )
-        
+        dialog_content = ft.GestureDetector(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.GestureDetector(
+                            content=ft.Container(
+                                content=preview_gesture,
+                                alignment=ft.Alignment(0.0, 0.0),
+                                padding=6,
+                                expand=True,
+                            ),
+                            on_secondary_tap=on_secondary_tap,
+                        ),
+                        path_text_container,
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=4,
+                ),
+                width=dialog_w + 40,
+                height=dialog_h + 76,
+                padding=12,
+            ),
+            on_secondary_tap=on_dialog_secondary_tap,
+        )
+        self._preview_dialog_content = dialog_content
+
+        dialog = ft.AlertDialog(
+            content=dialog_content,
+            modal=False,
+            title=None,
+            actions=[],
+            content_padding=ft.Padding(0),
+            inset_padding=ft.Padding(0),
+            title_padding=ft.Padding(0),
+            actions_padding=ft.Padding(0),
+            on_dismiss=self._on_preview_dismissed,
+        )
+
+        if self._preview_dialog is not None and self._preview_dialog in self.page.overlay:
+            self._preview_dialog.open = False
+            self._on_preview_dismissed(None)
+
+        def on_page_secondary_tap(e):
+            if self._preview_dialog is not None and self._preview_dialog.open:
+                self._preview_dialog.open = False
+                self._on_preview_dismissed(None)
+
+        self.page.on_secondary_tap = on_page_secondary_tap
         self.page.overlay.append(dialog)
+        self._preview_dialog = dialog
         dialog.open = True
         self.page.update()
     

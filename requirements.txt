@@ -1,0 +1,10 @@
+torch
+transformers
+pillow
+scikit-learn
+faiss-cpu>=1.7.4
+numpy
+opencv-python-headless
+flet==0.86.5
+umap-learn
+hdbscan

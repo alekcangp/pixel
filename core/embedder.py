@@ -5,10 +5,7 @@ import time
 import warnings
 
 import numpy as np
-import torch
 from PIL import Image, ImageFile, ImageOps
-from transformers import AutoModel, AutoProcessor
-from transformers.utils import logging as tf_logging
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
@@ -16,21 +13,54 @@ warnings.filterwarnings("ignore")
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
 
-tf_logging.set_verbosity_error()
-
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 import config
 from core import database
-from core.scanner import load_index, STOP_REQUESTED
+from core import scanner
+
+try:
+    import torch
+    from transformers import AutoModel, AutoProcessor
+    from transformers.utils import logging as tf_logging
+    tf_logging.set_verbosity_error()
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+    torch = None
+    AutoModel = None
+    AutoProcessor = None
 
 # Singleton instance для эмбеддера
 _embedder_instance = None
 
 
+def _detect_device():
+    if not _HAS_TORCH:
+        return "cpu"
+    if torch.cuda.is_available():
+        try:
+            free = torch.cuda.mem_get_info()[0]
+            if free < 1.5 * 1024**3:
+                print("Мало VRAM, fallback на CPU")
+                return "cpu"
+            return "cuda"
+        except Exception:
+            return "cpu"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        print("Используем Apple Silicon MPS")
+        return "mps"
+    return "cpu"
+
+
 class SiglipEmbedder:
     def __init__(self):
-        self.device = self._detect_device()
+        if not _HAS_TORCH:
+            raise RuntimeError(
+                "PyTorch не установлен. Установите torch для эмбеддингов: "
+                "pip install torch"
+            )
+        self.device = _detect_device()
         print(f"Устройство: {self.device}")
 
         self.processor = AutoProcessor.from_pretrained(config.SIGLIP_MODEL)
@@ -40,19 +70,6 @@ class SiglipEmbedder:
             self.model = self.model.half()
         self.model = self.model.to(self.device)
         self.model.eval()
-
-    @staticmethod
-    def _detect_device():
-        if torch.cuda.is_available():
-            try:
-                free = torch.cuda.mem_get_info()[0]
-                if free < 1.5 * 1024**3:
-                    print("Мало VRAM, fallback на CPU")
-                    return "cpu"
-                return "cuda"
-            except Exception:
-                return "cpu"
-        return "cpu"
 
     def _load_image(self, path):
         with Image.open(path) as img:
@@ -74,7 +91,7 @@ class SiglipEmbedder:
         valid_paths = []
         n = len(paths)
         for i in range(0, n, batch_size):
-            if STOP_REQUESTED:
+            if scanner.STOP_REQUESTED:
                 print("\nОстановка по запросу пользователя.")
                 break
             batch_paths = paths[i:i + batch_size]
@@ -93,13 +110,8 @@ class SiglipEmbedder:
                 continue
 
             batch_embeddings = []
-            # Пути, для которых реально получены эмбеддинги в этом батче.
-            # ВАЖНО: в fallback-режиме не все batch_valid могут быть успешно
-            # обработаны, поэтому нельзя передавать batch_valid целиком —
-            # иначе пути будут сопоставлены с чужими эмбеддингами.
             batch_embedded_paths = []
             try:
-                # SigLIP2 — мультимодальная модель: используем непустой текст-заглушку.
                 inputs = self.processor(
                     images=images,
                     text=["image"] * len(images),
@@ -115,7 +127,6 @@ class SiglipEmbedder:
                 valid_paths.extend(batch_valid)
             except Exception as e:
                 print("\nОшибка обработки батча %d-%d: %s" % (i + 1, min(i + batch_size, n), e))
-                # Пробуем по одному изображению, чтобы не терять весь батч.
                 for p in batch_valid:
                     try:
                         img = self._load_image(p)
@@ -135,7 +146,10 @@ class SiglipEmbedder:
                     except Exception:
                         continue
 
-            # Сохраняем обработанный батч в БД сразу (для устойчивости к прерыванию)
+            if scanner.STOP_REQUESTED:
+                print("\nОстановка по запросу пользователя.")
+                break
+
             if batch_embeddings and batch_save_callback is not None:
                 try:
                     batch_save_callback(np.vstack(batch_embeddings), batch_embedded_paths)
@@ -169,28 +183,30 @@ def get_embedder() -> SiglipEmbedder:
 
 
 def run(progress_callback=None, incremental=True):
-    files = load_index()
+    if not _HAS_TORCH:
+        print(
+            "Эмбеддинги недоступны: PyTorch не установлен. "
+            "Установите torch для использования эмбеддингов: "
+            "pip install torch"
+        )
+        return None
+
+    files = scanner.load_index()
     if files is None:
         print("Индекс не найден. Сначала выполните: python main.py scan --path ...")
         return None
 
     all_paths = [f["path"] for f in files]
-    # Текущий mtime для каждого файла (из индекса)
     current_mtime_map = {f["path"]: f.get("mtime", 0) for f in files}
 
     if incremental:
-        # В инкрементальном режиме исключаем дубликаты и повреждённые файлы
         dup_paths = database.load_duplicate_paths() or set()
         failed_paths = database.load_failed_paths() or set()
         excluded = dup_paths | failed_paths
-        
-        # Загружаем существующие эмбеддинги с mtime
+
         existing_embeddings, existing_embed_paths, existing_mtime = database.load_embeddings_with_mtime()
         existing_embed_set = set(existing_embed_paths) if existing_embed_paths else set()
 
-        # Определяем, для каких файлов нужно вычислить эмбеддинги:
-        #   - новые (нет в existing_embed_set)
-        #   - изменённые (mtime отличается от сохранённого)
         paths_to_embed = []
         for p in all_paths:
             if p in excluded:
@@ -208,7 +224,6 @@ def run(progress_callback=None, incremental=True):
         print(f"  Уже есть эмбеддинги: {len(existing_embed_set)}")
         print(f"  Нужно вычислить: {len(paths_to_embed)}")
     else:
-        # В полном режиме обрабатываем ВСЕ файлы, включая дубликаты и повреждённые
         paths_to_embed = all_paths[:]
         print("Полный режим: пересчёт всех эмбеддингов")
         print(f"  Всего файлов для обработки: {len(paths_to_embed)}")
@@ -217,7 +232,6 @@ def run(progress_callback=None, incremental=True):
         print("Нет файлов для обработки.")
         return None
 
-    # Модель уже загружена через preload_model() в app_flet.py
     t0 = time.time()
     embedder = get_embedder()
     if embedder.device == "cuda":
@@ -225,14 +239,9 @@ def run(progress_callback=None, incremental=True):
     else:
         print(f"Модель готова (CPU), время инициализации: {time.time() - t0:.1f} с")
 
-    # При полном режиме очищаем таблицу embeddings перед началом,
-    # чтобы батчи сохранялись с нуля (без старых записей).
     if not incremental:
         database.save_embeddings(np.zeros((0, 0)), [], {}, incremental=False)
 
-    # Callback для сохранения каждого обработанного батча в БД сразу.
-    # Это обеспечивает устойчивость к прерыванию: при остановке/закрытии
-    # уже обработанные файлы не будут пересчитываться при следующем запуске.
     def batch_save_callback(batch_vectors, batch_paths):
         batch_mtime = {p: current_mtime_map.get(p, 0) for p in batch_paths}
         database.save_embeddings(batch_vectors, batch_paths, batch_mtime, incremental=True)
@@ -246,27 +255,22 @@ def run(progress_callback=None, incremental=True):
     )
     elapsed = time.time() - t0
 
-    if STOP_REQUESTED:
+    if scanner.STOP_REQUESTED:
         print("\nВычисление эмбеддингов остановлено. Уже обработанные батчи сохранены в БД.")
         return None
 
     if len(valid_paths) != len(paths_to_embed):
         print(f"Пропущено повреждённых файлов: {len(paths_to_embed) - len(valid_paths)}")
 
-    # mtime для новых/изменённых файлов
     new_mtime_map = {p: current_mtime_map.get(p, 0) for p in valid_paths}
 
-    # Сохраняем инкрементально
     if incremental and existing_embeddings is not None and existing_embed_paths:
-        # Объединяем старые и новые эмбеддинги
         all_embeddings = []
         all_paths_ordered = []
 
-        # Сначала старые
         all_embeddings.append(existing_embeddings)
         all_paths_ordered.extend(existing_embed_paths)
 
-        # Затем новые (заменяем, если путь уже был — на случай пересчёта)
         path_to_emb = {p: emb for p, emb in zip(valid_paths, embeddings)}
         final_paths = []
         final_embs = []
@@ -280,14 +284,12 @@ def run(progress_callback=None, incremental=True):
                 final_paths.append(p)
                 final_embs.append(emb)
 
-        # Добавляем оставшиеся новые
         for p, emb in zip(valid_paths, embeddings):
             if p not in seen:
                 final_paths.append(p)
                 final_embs.append(emb)
 
         final_embeddings = np.vstack(final_embs) if final_embs else np.zeros((0, 0))
-        # mtime: старые + обновлённые/новые
         final_mtime = dict(existing_mtime) if existing_mtime else {}
         final_mtime.update(new_mtime_map)
         database.save_embeddings(final_embeddings, final_paths, final_mtime, incremental=True)
@@ -305,8 +307,6 @@ def run(progress_callback=None, incremental=True):
 
     print(f"\nЭмбеддинги сохранены в БД: {config.DB_FILE}")
 
-    # Эмбеддинги изменились — сбрасываем кэш семантического поиска,
-    # иначе текстовый поиск будет использовать устаревшие данные.
     try:
         from core import search
         search.clear_cache()

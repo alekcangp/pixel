@@ -18,12 +18,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 import numpy as np
+from PIL import Image
 
 warnings.filterwarnings('ignore')
 
 import config
 from core import database
-from core.scanner import load_index
+from core import scanner
 
 
 # ============================================================
@@ -127,15 +128,39 @@ def _bits_to_int(bits):
     return int(h)
 
 
+def _phash_pil(path):
+    """Fallback pHash через PIL + numpy (когда cv2.img_hash недоступен)."""
+    try:
+        img = Image.open(path).convert("L")
+        img = img.resize((32, 32), Image.Resampling.LANCZOS)
+        arr = np.array(img, dtype=np.float32)
+        dct = np.fft.fft2(arr)
+        dct = np.abs(dct[:8, :8])
+        dct[0, 0] = 0
+        median = np.median(dct)
+        bits = (dct > median).flatten()[:64]
+        h = 0
+        for bit in bits:
+            h = (h << 1) | int(bit)
+        return int(h)
+    except Exception:
+        return None
+
+
 def compute_phash(path):
-    """pHash (Perceptual Hash) через OpenCV. Возвращает 64-битный int или None."""
+    """pHash (Perceptual Hash). Возвращает 64-битный int или None."""
     img = load_image_cv(path)
     if img is None:
         return None
     try:
-        hasher = cv2.img_hash.PHash_create()
-        res = hasher.compute(img)
-        return _bits_to_int(res[0].flatten()[:64])
+        if hasattr(cv2, "img_hash"):
+            hasher = cv2.img_hash.PHash_create()
+            res = hasher.compute(img)
+            return _bits_to_int(res[0].flatten()[:64])
+    except Exception:
+        pass
+    try:
+        return _phash_pil(path)
     except Exception:
         return None
 
@@ -299,6 +324,9 @@ class LSHIndex:
         # и объединяем через Union-Find
         processed = 0
         for i, (_, h) in enumerate(self._items):
+            if scanner.STOP_REQUESTED:
+                print("\nОстановка кластеризации pHash по запросу пользователя.")
+                break
             # Собираем кандидатов по всем подблокам элемента i
             candidates = set()
             offset = 0
@@ -360,11 +388,11 @@ def _process_single(path):
     return (path, h), "ok"
 
 
-def find_similar_images(files, max_workers=4, progress_callback=None):
+def find_similar_images(files, max_workers=4, progress_callback=None, existing_hashes=None):
     paths_to_process = [f["path"] for f in files]
     total = len(paths_to_process)
 
-    if total == 0:
+    if total == 0 and not existing_hashes:
         return [], [], {}, {}
 
     threshold = config.PHASH_THRESHOLD
@@ -380,6 +408,14 @@ def find_similar_images(files, max_workers=4, progress_callback=None):
 
         completed = 0
         for future in as_completed(futures):
+            if scanner.STOP_REQUESTED:
+                print("\nОстановка дедупликации по запросу пользователя.")
+                # Отменяем ещё не запущенные задачи: иначе ThreadPoolExecutor
+                # при выходе из контекста (shutdown(wait=True)) будет ждать их
+                # завершения, и остановка не сработает.
+                for f in futures:
+                    f.cancel()
+                break
             path = futures[future]
             result, reason = future.result()
             if result is not None:
@@ -396,12 +432,17 @@ def find_similar_images(files, max_workers=4, progress_callback=None):
             if completed % 50 == 0 or completed == total:
                 _progress(completed, total, "Похожие изображения (pHash)")
 
-    n = len(hashes)
+    # Объединяем новые хэши с существующими для поиска дубликатов между новыми и старыми файлами
+    combined_hashes = list(hashes)
+    if existing_hashes:
+        combined_hashes.extend(existing_hashes)
+
+    n = len(combined_hashes)
     if n == 0:
         return [], failed_paths, failed_reasons, hash_map
 
     print("\nКластеризация %d хэшей..." % n)
-    index = LSHIndex(hashes, threshold)
+    index = LSHIndex(combined_hashes, threshold)
     groups = index.find_clusters(progress_callback=progress_callback)
 
     return groups, failed_paths, failed_reasons, hash_map
@@ -523,7 +564,7 @@ def print_stats(similar_groups, files, failed_paths=None, failed_reasons=None):
 
 
 def run(move_to=None, progress_callback=None, incremental=True):
-    files = load_index()
+    files = scanner.load_index()
     if files is None:
         print("Индекс не найден. Сначала выполните: python main.py scan --path ...")
         return None
@@ -583,9 +624,23 @@ def run(move_to=None, progress_callback=None, incremental=True):
         print("Нет новых файлов для дедупликации.")
         return existing_groups, list(existing_failed), {}
 
+    # В инкрементальном режиме подготавливаем существующие хэши для поиска дубликатов
+    # между новыми/изменёнными файлами и уже имеющимися в БД.
+    existing_hashes_for_lsh = []
+    if incremental and existing_with_mtime:
+        for p, (h, mtime) in existing_with_mtime.items():
+            if p in current_paths and p not in excluded:
+                existing_hashes_for_lsh.append((p, h))
+
     similar, failed_paths, failed_reasons, hash_map = find_similar_images(
-        files_to_process, progress_callback=progress_callback
+        files_to_process,
+        progress_callback=progress_callback,
+        existing_hashes=existing_hashes_for_lsh,
     )
+
+    if scanner.STOP_REQUESTED:
+        print("\nДедупликация остановлена. Частичные результаты не сохранены.")
+        return None
 
     # Сохраняем вычисленные хэши инкрементально (с mtime)
     if hash_map:

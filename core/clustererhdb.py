@@ -7,6 +7,7 @@ import hdbscan
 
 import config
 from core import database
+from core import scanner
 
 # Отключаем предупреждения для чистоты вывода
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -97,6 +98,10 @@ def _reduce_dimensions_umap(embeddings, n_neighbors=None, n_components=None, min
     print(f"UMAP: n_samples={n_samples}, n_neighbors={n_neighbors}, "
           f"n_components={n_components}, min_dist={min_dist}")
     
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return np.zeros((n_samples, n_components))
+    
     reducer = umap.UMAP(
         n_components=n_components,
         n_neighbors=n_neighbors,
@@ -129,6 +134,9 @@ def _explode_mega_cluster(raw_embeddings, mega_mask):
     mega_emb = _l2_normalize(mega_emb)
     
     # Sub-UMAP: жёсткая локальная проекция для выявления микро-структур
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return np.full(mega_size, -1, dtype=int)
     sub_umap = umap.UMAP(
         n_neighbors=config.SUB_UMAP_N_NEIGHBORS,
         n_components=config.SUB_UMAP_N_COMPONENTS,
@@ -142,6 +150,9 @@ def _explode_mega_cluster(raw_embeddings, mega_mask):
     sub_emb = sub_umap.fit_transform(mega_emb)
     
     # Sub-HDBSCAN: leaf — срезает пики, плоский фон → -1
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return np.full(mega_size, -1, dtype=int)
     sub_min_cluster_size = _adaptive_sub_min_cluster_size(mega_size)
     sub_clusterer = hdbscan.HDBSCAN(
         min_cluster_size=sub_min_cluster_size,
@@ -294,6 +305,9 @@ def refine_mega_cluster(embeddings, level1_labels, level1_umap):
     total_micro = 0
     
     for mega_id in mega_ids:
+        if scanner.STOP_REQUESTED:
+            print("\nОстановка кластеризации по запросу пользователя.")
+            break
         mega_size = valid[mega_id]
         print(f"\n=== Level 2: Взрыв мега-кластера ===")
         print(f"Мега-кластер: ID={mega_id}, {mega_size} точек ({mega_size / n * 100:.1f}%)")
@@ -381,22 +395,34 @@ def cluster(embeddings, progress_callback=None):
         return labels
     
     # Шаг 1: L2 нормализация
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return np.zeros(n_samples, dtype=int)
     if progress_callback:
         progress_callback("cluster", 0, n_samples, "Нормализация эмбеддингов...")
     embeddings = _l2_normalize(embeddings)
     
     # Шаг 2: Уменьшение размерности через UMAP
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return np.zeros(n_samples, dtype=int)
     if progress_callback:
         progress_callback("cluster", 0, n_samples, "UMAP: снижение размерности...")
     embeddings_reduced = _reduce_dimensions_umap(embeddings)
     
     # Шаг 3: Адаптивные параметры HDBSCAN
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return np.zeros(n_samples, dtype=int)
     min_cluster_size = _adaptive_min_cluster_size(n_samples)
     min_samples = max(2, min_cluster_size // 5)
     
     print(f"HDBSCAN: min_cluster_size={min_cluster_size}, min_samples={min_samples}")
     
     # Шаг 4: Кластеризация
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return np.zeros(n_samples, dtype=int)
     if progress_callback:
         progress_callback("cluster", 0, n_samples, "HDBSCAN: инициализация...")
     
@@ -420,6 +446,9 @@ def cluster(embeddings, progress_callback=None):
           f"({n_noise / n_samples * 100:.1f}%)")
     
     # Шаг 5: Level 2 — взрыв мега-кластера + KNN Rescue
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return final_labels
     if progress_callback:
         progress_callback("cluster", 0, n_samples, "Level 2: взрыв мега-кластера...")
     
@@ -428,6 +457,9 @@ def cluster(embeddings, progress_callback=None):
     # Шаг 6: Noise Rescue — присоединение избыточного шума к ближайшим кластерам
     # Если HDBSCAN пометил слишком много точек как шум (> NOISE_RESCUE_THRESHOLD),
     # это значит параметры слишком строгие. Присоединяем шум к ближайшим кластерам.
+    if scanner.STOP_REQUESTED:
+        print("\nОстановка кластеризации по запросу пользователя.")
+        return final_labels
     n_noise_after = int(np.sum(final_labels == -1))
     noise_threshold = getattr(config, "NOISE_RESCUE_THRESHOLD", 0.15)
     if n_noise_after / n_samples > noise_threshold:
@@ -495,6 +527,10 @@ def run(progress_callback=None):
         progress_callback("cluster", 1, total, "UMAP: снижение размерности...")
     
     labels = cluster(embeddings, progress_callback=progress_callback)
+    
+    if scanner.STOP_REQUESTED:
+        print("\nКластеризация остановлена. Результаты не сохранены.")
+        return None
     
     if progress_callback is not None:
         progress_callback("cluster", int(total * 0.8), total, "HDBSCAN завершён")

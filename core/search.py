@@ -4,13 +4,19 @@ import sys
 
 import faiss
 import numpy as np
-import torch
 
 import config
 from core import database
 from core.dedup import LSHIndex, compute_phash
-from core.embedder import get_embedder
+from core.embedder import get_embedder, _HAS_TORCH as _EMBEDDER_HAS_TORCH
 from core.scanner import load_index
+
+try:
+    import torch
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+    torch = None
 
 
 # ============================================================
@@ -113,11 +119,7 @@ _cache = {
 
 
 def clear_cache():
-    """Сбрасывает кэш эмбеддингов и FAISS-индекса.
-
-    Должен вызываться после пересчёта эмбеддингов (embedder.run), иначе
-    текстовый поиск будет возвращать результаты на основе устаревших данных.
-    """
+    """Сбрасывает кэш эмбеддингов и FAISS-индекса."""
     _cache["embeddings"] = None
     _cache["paths"] = None
     _cache["index"] = None
@@ -142,21 +144,17 @@ def embed_query(embedder, text):
 
 
 def run(query, top_k=None, threshold=None):
-    """Семантический поиск.
-
-    Возвращает результаты, близость которых попадает в интервал
-    [best - threshold, best], где best — максимальная близость среди
-    найденных. Результаты отсортированы по убыванию близости
-    (самый близкий — первый). Если threshold равен None,
-    используется config.SEARCH_THRESHOLD. Если threshold == 0.0,
-    возвращаются все top_k результатов.
-    """
+    """Семантический поиск."""
     if top_k is None:
         top_k = config.SEARCH_TOP_K
     if threshold is None:
         threshold = config.SEARCH_THRESHOLD
 
-    # Кэшируем эмбеддинги и индекс, чтобы не перестраивать при каждом поиске
+    if not _HAS_TORCH or not _EMBEDDER_HAS_TORCH:
+        print("Семантический поиск недоступен: PyTorch не установлен.")
+        print("Установите torch для использования семантического поиска: pip install torch")
+        return []
+
     if _cache["embeddings"] is None or _cache["paths"] is None:
         embeddings, paths = database.load_embeddings()
         if embeddings is None:
@@ -180,14 +178,12 @@ def run(query, top_k=None, threshold=None):
     top_k = min(top_k, len(paths))
     scores, indices = index.search(q, top_k)
 
-    # Собираем все результаты
     all_results = []
     for score, idx in zip(scores[0], indices[0]):
         if idx >= len(paths):
             continue
         all_results.append((paths[idx], float(score)))
 
-    # Фильтруем по интервалу [best - threshold, best]
     if threshold > 0.0 and all_results:
         best = all_results[0][1]
         min_score = best - threshold

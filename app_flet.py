@@ -31,11 +31,38 @@ def _format_size(size_bytes: int) -> str:
 class ImageDedupApp:
     def __init__(self, page: ft.Page):
         self.page = page
-
+        
+        # 1. Настраиваем окно, но пока держим его скрытым, чтобы оно не
+        #    мелькало в левом верхнем углу. Размер выставляем сразу.
         self.page.title = "Image Deduplication"
         self.page.theme_mode = ft.ThemeMode.DARK
-        self.page.window_width = 1200
-        self.page.window_height = 800
+        self.page.window.width = 1150
+        self.page.window.height = 700
+        #self.page.window.visible = False
+        #self.page.update()
+
+        # 2. Показываем окно только после готовности: ждём клиента,
+        #    центрируем и делаем видимым. (page.window.center() — async,
+        #    поэтому его нельзя просто вызвать в __init__.)
+        async def _open_window():
+            try:
+                await asyncio.wait_for(
+                    self.page.window.wait_until_ready_to_show(), timeout=5
+                )
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self.page.window.center(), timeout=5)
+            except Exception:
+                pass
+            try:
+                self.page.window.visible = True
+            except Exception:
+                pass
+            self.page.update()
+
+        self.page.run_task(_open_window)
+        
         self.page.padding = 20
         self.page.spacing = 10
         
@@ -51,12 +78,18 @@ class ImageDedupApp:
         self.model_loading = False
         self.scanning = False
         self.scan_task = None
+        self._scan_worker_tasks = []
+
+
         
         # Состояние выбора изображений
         self.selected_images = set()
-        saved_selection = database.load_selected_files(scope="global")
-        if saved_selection:
-            self.selected_images = saved_selection
+        try:
+            saved_selection = database.load_selected_files(scope="global")
+            if saved_selection:
+                self.selected_images = saved_selection
+        except Exception as e:
+            print(f"Ошибка загрузки выделенных файлов: {e}")
         
         # Сохраняем путь экспорта между переключениями вкладок
         self._export_dest_folder_path = None
@@ -79,16 +112,16 @@ class ImageDedupApp:
         self.load_stats()
         
         # Показываем первый кластер по умолчанию
-        asyncio.create_task(self.show_clusters_tab())
+        self.page.run_task(self.show_clusters_tab)
         
         # Фоновая загрузка модели
-        asyncio.create_task(self.preload_model())
+        self.page.run_task(self.preload_model)
         
         # Обработчик изменения размера окна
         self.page.on_resize = self.on_window_resize
 
         # Обработчик закрытия окна — останавливаем фоновые вычисления
-        self.page.window.on_event = self.on_window_event
+        self.page.on_window_event = self.on_window_event
         
         # Состояние модального превью
         self._preview_dialog = None
@@ -104,6 +137,11 @@ class ImageDedupApp:
         
         # Глобальные клавиатурные сокращения для превью
         self.page.on_keyboard_event = self._on_preview_keyboard
+        
+        # 2. Однократный вывод уже полностью готового интерфейса нужного размера.
+        #    Само окно показывается и центрируется задачей _open_window, чтобы
+        #    не мелькнуть в углу и открыться ровно по центру экрана.
+        self.page.update()
     
     def _pick_folder(self, title: str) -> str | None:
         """Открывает нативный диалог выбора папки через tkinter."""
@@ -241,14 +279,23 @@ class ImageDedupApp:
                 if row_idx < len(columns[col_idx]):
                     cluster_id, members = columns[col_idx][row_idx]
                     is_active = self.active_cluster_id == cluster_id
-                    # Нумерация с 1, показываем количество изображений
+                    has_selected = any(path in self.selected_images for path in members)
+                    if is_active:
+                        bgcolor = ft.Colors.PRIMARY
+                        color = ft.Colors.ON_PRIMARY
+                    elif has_selected:
+                        bgcolor = ft.Colors.PRIMARY_CONTAINER
+                        color = ft.Colors.ON_PRIMARY_CONTAINER
+                    else:
+                        bgcolor = ft.Colors.SURFACE_CONTAINER_HIGHEST
+                        color = ft.Colors.ON_SURFACE
                     button = ft.ElevatedButton(
                         f"{cluster_id + 2} ({len(members)})",
                         data=cluster_id,
                         width=70,
                         height=50,
-                        bgcolor=ft.Colors.PRIMARY if is_active else ft.Colors.SURFACE_CONTAINER_HIGHEST,
-                        color=ft.Colors.ON_PRIMARY if is_active else ft.Colors.ON_SURFACE,
+                        bgcolor=bgcolor,
+                        color=color,
                         on_click=self.on_cluster_button_click,
                         style=ft.ButtonStyle(
                             padding=ft.Padding(6, 4, 6, 4),
@@ -273,16 +320,16 @@ class ImageDedupApp:
         # Обновляем подсветку кнопок
         self.update_clusters_list()
     
-    def on_window_event(self, e):
+    async def on_window_event(self, e):
         """Обработчик событий окна — при закрытии останавливаем фоновые вычисления."""
-        if e.data == ft.WindowEventType.CLOSE:
-            scanner.STOP_REQUESTED = True
-            self.scanning = False
-            # Даём фоновым потокам сигнал остановки и выходим.
-            # os._exit может прервать запись в SQLite; sys.exit позволяет
-            # Python-сборщику мусора корректно закрыть соединения.
-            import sys as _sys
-            _sys.exit(0)
+        try:
+            if e is not None and getattr(e, "type", None) == ft.WindowEventType.CLOSE:
+                await self._cancel_scan_workers()
+                print("Приложение закрыто.")
+                import sys as _sys
+                _sys.exit(0)
+        except Exception as ex:
+            print(f"Ошибка в обработчике окна: {ex}")
 
     def on_window_resize(self, e):
         """Обработчик изменения размера окна - пересоздаём галерею"""
@@ -411,11 +458,23 @@ class ImageDedupApp:
         )
     
     async def preload_model(self):
-        """Фоновая загрузка модели"""
+        """Фоновая загрузка модели.
+
+        Загрузка/скачивание SigLIP выполняется в отдельном потоке
+        (asyncio.to_thread), чтобы не блокировать UI-поток Flet. Благодаря этому
+        во время загрузки модели окно уже отрисовано и отображает статистику
+        и превью (галерею), а индикатор в боковой панели показывает прогресс.
+        """
         self.model_loading = True
+        self.model_status_ring.visible = True
+        self.model_status_ring.value = None  # неопределённый спиннер
+        self.model_status.value = "Загрузка модели..."
+        self.model_status.color = ft.Colors.ON_SURFACE_VARIANT
+        self.page.update()
         try:
             from core.embedder import get_embedder
-            get_embedder()
+            # Тяжёлая инициализация модели уходит в фоновый поток.
+            await asyncio.to_thread(get_embedder)
             self.model_loaded = True
             self.model_status_ring.visible = False
             self.model_status.value = "✅ Модель загружена"
@@ -525,19 +584,18 @@ class ImageDedupApp:
             }
             label = labels.get(stage, stage)
 
-            # Безопасное обновление значений
             async def update_ui():
+                if not self.scanning:
+                    return
                 if total and total > 0:
                     progress = min(current / total, 1.0)
                     self.progress_bar.value = progress
                     self.progress_text.value = f"{label}: {current}/{total} ({int(progress * 100)}%) · {message}"
                 else:
-                    # Индикатор неопределённого прогресса
                     self.progress_text.value = f"{label}: {message}"
 
                 self.page.update()
 
-            # Переносим обновление UI в главный поток
             self.page.run_task(update_ui)
         except Exception as ex:
             print(f"Progress callback error: {ex}")
@@ -561,20 +619,155 @@ class ImageDedupApp:
             # macOS/Linux: / и /Volumes/* (macOS дополнительно монтирует
             # внешние диски в /Volumes)
             disks = ["/"]
+            root_dev = os.stat("/").st_dev
             volumes = "/Volumes"
             if os.path.isdir(volumes):
                 for name in os.listdir(volumes):
                     full = os.path.join(volumes, name)
                     if os.path.isdir(full):
-                        disks.append(full)
+                        try:
+                            if os.stat(full).st_dev != root_dev:
+                                disks.append(full)
+                        except OSError:
+                            continue
             return disks
+
+    async def _cancel_scan_workers(self):
+        """Отменяет все фоновые задачи сканирования и дожидается завершения."""
+        self.scanning = False
+        scanner.STOP_REQUESTED = True
+
+        if self.scan_task is not None:
+            self.scan_task.cancel()
+            self.scan_task = None
+
+        tasks = list(getattr(self, "_scan_worker_tasks", []))
+        self._scan_worker_tasks = []
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        if tasks:
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception:
+                pass
+
+    async def _run_scan_workflow(self, scan_paths):
+        try:
+            files = []
+            for i, path in enumerate(scan_paths):
+                if scanner.STOP_REQUESTED:
+                    break
+                self.progress_text.value = f"Сканирование ({i + 1}/{len(scan_paths)}): {path}"
+                self.page.update()
+                
+                task = asyncio.create_task(asyncio.to_thread(
+                    scanner.run,
+                    path,
+                    None, None, None,
+                    incremental=True,
+                    progress_callback=self._progress_callback,
+                ))
+                self._scan_worker_tasks.append(task)
+                try:
+                    result = await task
+                finally:
+                    if task in self._scan_worker_tasks:
+                        self._scan_worker_tasks.remove(task)
+                if result:
+                    files.extend(result)
+            
+            if scanner.STOP_REQUESTED:
+                return
+            
+            if not files:
+                self.show_snackbar("Файлы не найдены", ft.Colors.ORANGE)
+                return
+            
+            # 2. Дедупликация
+            self.progress_text.value = "Дедупликация..."
+            self.progress_bar.value = 0
+            self.page.update()
+            
+            task = asyncio.create_task(asyncio.to_thread(dedup.run, incremental=True, progress_callback=self._progress_callback))
+            self._scan_worker_tasks.append(task)
+            try:
+                await task
+            finally:
+                if task in self._scan_worker_tasks:
+                    self._scan_worker_tasks.remove(task)
+
+            if scanner.STOP_REQUESTED:
+                return
+
+            # Обновляем статистику после дедупликации (дубликаты уже сохранены в БД)
+            self.load_stats()
+
+            # 3. Эмбеддинги
+            self.progress_text.value = "Эмбеддинги..."
+            self.progress_bar.value = 0
+            self.page.update()
+            
+            task = asyncio.create_task(asyncio.to_thread(embedder.run, incremental=True, progress_callback=self._progress_callback))
+            self._scan_worker_tasks.append(task)
+            try:
+                result = await task
+            finally:
+                if task in self._scan_worker_tasks:
+                    self._scan_worker_tasks.remove(task)
+
+            # Эмбеддинги могли измениться — сбрасываем кэш семантического поиска,
+            # чтобы последующие запросы использовали свежие данные.
+            search.clear_cache()
+
+            if scanner.STOP_REQUESTED:
+                return
+            
+            # 4. Кластеризация (только если включено в конфиге)
+            if config.AUTO_CLUSTER_AFTER_SCAN:
+                self.progress_text.value = "Кластеризация..."
+                self.progress_bar.value = 0
+                self.page.update()
+                
+                task = asyncio.create_task(asyncio.to_thread(clustererhdb.run, progress_callback=self._progress_callback))
+                self._scan_worker_tasks.append(task)
+                try:
+                    await task
+                finally:
+                    if task in self._scan_worker_tasks:
+                        self._scan_worker_tasks.remove(task)
+                
+                if scanner.STOP_REQUESTED:
+                    return
+                
+                # Обновить статистику после кластеризации
+                self.load_stats()
+            
+            self.show_snackbar("Готово!", ft.Colors.GREEN)
+            
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            if self.scanning:
+                self.show_snackbar(f"Ошибка: {e}", ft.Colors.RED)
+        finally:
+            print("Процесс завершён.")
+            self.scanning = False
+            self.scan_button.text = "Сканировать"
+            self.scan_button.icon = ft.Icons.SEARCH
+            self.scan_button.bgcolor = ft.Colors.PRIMARY
+            self.progress_bar.visible = False
+            self.progress_text.visible = False
+            self.progress_container.visible = False
+            self.page.update()
 
     async def toggle_scan(self, e):
         """Запуск/остановка сканирования"""
         if self.scanning:
             # Останавливаем сканирование
-            self.scanning = False
-            scanner.STOP_REQUESTED = True
+            await self._cancel_scan_workers()
             self.scan_button.text = "Сканировать"
             self.scan_button.icon = ft.Icons.SEARCH
             self.scan_button.bgcolor = ft.Colors.PRIMARY
@@ -583,6 +776,7 @@ class ImageDedupApp:
             self.progress_container.visible = False
             self.page.update()
             self.show_snackbar("Сканирование остановлено", ft.Colors.ORANGE)
+            print("Сканирование остановлено пользователем.")
             return
         
         scan_path = self.scan_path_input.value
@@ -615,94 +809,7 @@ class ImageDedupApp:
         self.progress_text.value = "Подготовка..."
         self.page.update()
         
-        try:
-            # 1. Сканирование (все пути последовательно)
-            self.progress_text.value = "Сканирование..."
-            self.progress_bar.value = 0
-            self.page.update()
-            
-            files = []
-            for i, path in enumerate(scan_paths):
-                if scanner.STOP_REQUESTED:
-                    break
-                self.progress_text.value = f"Сканирование ({i + 1}/{len(scan_paths)}): {path}"
-                self.page.update()
-                
-                result = await asyncio.to_thread(
-                    scanner.run,
-                    path,
-                    None, None, None,
-                    incremental=True,
-                    progress_callback=self._progress_callback,
-                )
-                if result:
-                    files.extend(result)
-            
-            if scanner.STOP_REQUESTED:
-                return
-            
-            if not files:
-                self.show_snackbar("Файлы не найдены", ft.Colors.ORANGE)
-                return
-            
-            # 2. Дедупликация
-            self.progress_text.value = "Дедупликация..."
-            self.progress_bar.value = 0
-            self.page.update()
-            
-            await asyncio.to_thread(dedup.run, incremental=True, progress_callback=self._progress_callback)
-
-            if scanner.STOP_REQUESTED:
-                return
-
-            # Обновляем статистику после дедупликации (дубликаты уже сохранены в БД)
-            self.load_stats()
-
-            # 3. Эмбеддинги
-            self.progress_text.value = "Эмбеддинги..."
-            self.progress_bar.value = 0
-            self.page.update()
-            
-            result = await asyncio.to_thread(embedder.run, incremental=True, progress_callback=self._progress_callback)
-
-            # Эмбеддинги могли измениться — сбрасываем кэш семантического поиска,
-            # чтобы последующие запросы использовали свежие данные.
-            search.clear_cache()
-
-            if scanner.STOP_REQUESTED:
-                return
-            
-            # 4. Кластеризация (только если включено в конфиге)
-            if config.AUTO_CLUSTER_AFTER_SCAN:
-                self.progress_text.value = "Кластеризация..."
-                self.progress_bar.value = 0
-                self.page.update()
-                
-                await asyncio.to_thread(clustererhdb.run, progress_callback=self._progress_callback)
-                
-                if scanner.STOP_REQUESTED:
-                    return
-                
-                # Обновить статистику после кластеризации
-                self.load_stats()
-            
-            self.show_snackbar("Готово!", ft.Colors.GREEN)
-            
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            if self.scanning:
-                self.show_snackbar(f"Ошибка: {e}", ft.Colors.RED)
-        finally:
-            self.scanning = False
-            scanner.STOP_REQUESTED = False
-            self.scan_button.text = "Сканировать"
-            self.scan_button.icon = ft.Icons.SEARCH
-            self.scan_button.bgcolor = ft.Colors.PRIMARY
-            self.progress_bar.visible = False
-            self.progress_text.visible = False
-            self.progress_container.visible = False
-            self.page.update()
+        self.scan_task = asyncio.create_task(self._run_scan_workflow(scan_paths))
     
     def browse_scan_path(self, e):
         """Открыть нативный проводник для выбора пути сканирования."""
@@ -753,8 +860,7 @@ class ImageDedupApp:
     async def _do_reset(self):
         """Полный сброс базы данных, кэша и состояния приложения"""
         if self.scanning:
-            self.scanning = False
-            scanner.STOP_REQUESTED = True
+            await self._cancel_scan_workers()
             self.scan_button.text = "Сканировать"
             self.scan_button.icon = ft.Icons.SEARCH
             self.scan_button.bgcolor = ft.Colors.PRIMARY
@@ -975,7 +1081,9 @@ class ImageDedupApp:
                 
                 if (i + 1) % 10 == 0 or (i + 1) == total_files:
                     progress = (i + 1) / total_files
-                    self.page.run_task(lambda cur=i+1, tot=total_files, p=progress: self._update_export_progress(cur, tot, p))
+                    async def _update_progress(cur=i+1, tot=total_files, p=progress):
+                        self._update_export_progress(cur, tot, p)
+                    self.page.run_task(_update_progress)
         
         await asyncio.to_thread(copy_files)
         
@@ -1623,6 +1731,7 @@ class ImageDedupApp:
             state = self.get_selection_state(self.current_gallery_paths)
             self.cluster_select_all_icon_button.icon = self.get_checkbox_icon(state)
         
+        self.update_clusters_list()
         self.page.update()
     
     def select_all(self, paths: list, value: bool):
@@ -1634,6 +1743,8 @@ class ImageDedupApp:
         
         # Сохраняем выделение в БД
         database.save_selected_files(list(self.selected_images), scope="global")
+        
+        self.update_clusters_list()
         
         self.show_snackbar(f"Выбрано: {len(self.selected_images)} файлов", ft.Colors.BLUE)
         
@@ -2128,9 +2239,12 @@ def _unique_path(folder, name, used_names):
 
 
 def main():
-    ft.app(
-        target=ImageDedupApp,
-    )
+    import traceback
+    try:
+        ft.app(target=ImageDedupApp)
+    except Exception as e:
+        traceback.print_exc()
+        print(f"Критическая ошибка при запуске: {e}")
 
 
 if __name__ == "__main__":

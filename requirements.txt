@@ -1,10 +1,13 @@
 torch
-transformers
+transformers>=4.38,<5.0
 pillow
 scikit-learn
 faiss-cpu>=1.7.4
-numpy
+numpy<2
+scipy<1.14
 opencv-python-headless
 flet==0.86.5
 umap-learn
 hdbscan
+protobuf
+sentencepiece

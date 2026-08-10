@@ -15,15 +15,69 @@ MIN_FILE_SIZE = 20 * 1024  # 10 КБ
 
 # Директории, исключаемые по умолчанию (тяжёлые/системные)
 DEFAULT_EXCLUDE_DIRS = [
-    "AppData", "node_modules", ".git", ".cache", "__pycache__",
-    "venv", ".venv", "env", ".env", "site-packages", "dist", "build",
-    ".gradle", ".m2", ".npm", ".yarn", ".cargo", ".rustup",
-    "Program Files", "ProgramData", "Program Files (x86)", "Windows", "System32",
-    "Temp", "tmp", "Trash", ".Trash", "Library", "Application Support", "Games",
-    # macOS служебные папки
-    ".DS_Store", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100",
-    ".TemporaryItems", ".VolumeIcon.icns", ".com.apple.timemachine.donotpresent",
-    "Photos Library.photoslibrary", "Mobile Documents", ".Trashes",
+    # --- Системные Windows ---
+    "Windows",
+    "System32",
+    "SysWOW64",
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
+    "AppData",
+    "Config.Msi",
+    "$Recycle.Bin",
+    "System Volume Information",
+    "WUTemp",
+    "WindowsUpdate",
+    "$WinREAgent",
+    "$WINDOWS.~BT",
+    "$WINDOWS.~WS",
+
+    # --- Системные macOS ---
+    "System",
+    "Library",
+    "Applications",
+    "Volumes",
+    "Network",
+    "cores",
+    "private",
+    "usr",
+    "bin",
+    "sbin",
+    "Mobile Documents",
+    "Photos Library.photoslibrary",
+
+    # --- Временные файлы и Корзина ---
+    "Temp",
+    "tmp",
+    ".cache",
+    "Trash",
+    ".Trash",
+    ".Trashes",
+
+    # --- Разработка и Сборка (Зависимости) ---
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "bower_components",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "env",
+    ".env",
+    "site-packages",
+    ".gradle",
+    ".m2",
+    ".npm",
+    ".yarn",
+    ".cargo",
+    ".rustup",
+    "dist",
+    "build",
+    "out",
+    "target",
+    ".idea",
+    ".vscode"
 ]
 
 # Дедупликация
@@ -31,7 +85,7 @@ PHASH_THRESHOLD = 3            # порог Hamming distance для pHash
 
 
 # Эмбеддинги
-SIGLIP_MODEL = "google/siglip2-base-patch16-224"
+SIGLIP_MODEL = "google/siglip-base-patch16-224"
 EMBED_BATCH_SIZE = 16
 EMBED_IMAGE_SIZE = 224
 

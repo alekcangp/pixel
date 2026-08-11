@@ -52,7 +52,7 @@ if !FOUND_MAJOR! LSS %REQ_MAJOR% (
 )
 
 if !PYTHON_INCOMPATIBLE! EQU 1 (
-     echo Python !PY_VER! found, but torch does not support 3.13+ yet. Installing Python %PYTHON_INSTALL_VER%...
+echo Python !PY_VER! found, but torch does not support 3.13+ yet. Installing Python %PYTHON_INSTALL_VER%...
     goto DOWNLOAD_PYTHON
 )
 

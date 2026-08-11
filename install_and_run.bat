@@ -151,57 +151,52 @@ call .venv\Scripts\activate.bat
 
 :: ---------- 4. Dependencies ----------
 echo [DEPS] Entering deps section >> "%LOG_FILE%"
-if not exist ".venv\.deps_installed" (
-    echo Installing Python dependencies...
-    echo [DEPS] Installing... >> "%LOG_FILE%"
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-    if errorlevel 1 (
-        echo Failed to install Python dependencies.
-        echo [DEPS] FAILED >> "%LOG_FILE%"
-        pause
-        exit /b 1
-    )
-    type nul > .venv\.deps_installed
-    echo [DEPS] OK >> "%LOG_FILE%"
-) else (
-    echo Dependencies already installed.
-)
+if exist ".venv\.deps_installed" goto DEPS_SKIP
+echo Installing Python dependencies...
+echo [DEPS] Installing... >> "%LOG_FILE%"
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+if errorlevel 1 goto DEPS_FAIL
+type nul > .venv\.deps_installed
+echo [DEPS] OK >> "%LOG_FILE%"
+goto DEPS_DONE
+:DEPS_FAIL
+echo Failed to install Python dependencies.
+echo [DEPS] FAILED >> "%LOG_FILE%"
+pause
+exit /b 1
+:DEPS_SKIP
+echo Dependencies already installed.
+:DEPS_DONE
 
 :: ---------- 5. SigLIP model ----------
 set "HF_HUB_DISABLE_TELEMETRY=1"
 set "TRANSFORMERS_NO_ADVISORY_WARNINGS=1"
 
-if not exist ".venv\.model_downloaded" (
-    echo Downloading SigLIP model to cache...
-    echo [MODEL] Downloading... >> "%LOG_FILE%"
-    python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
-    if errorlevel 1 (
-        echo Failed to download SigLIP model. Check internet connection.
-        echo [MODEL] FAILED >> "%LOG_FILE%"
-        pause
-        exit /b 1
-    )
-    type nul > .venv\.model_downloaded
-    echo [MODEL] OK >> "%LOG_FILE%"
-) else (
-    echo Model already downloaded (flag .venv\.model_downloaded found).
-)
+if exist ".venv\.model_downloaded" goto MODEL_SKIP
+echo Downloading SigLIP model to cache...
+echo [MODEL] Downloading... >> "%LOG_FILE%"
+python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
+if errorlevel 1 goto MODEL_FAIL
+type nul > .venv\.model_downloaded
+echo [MODEL] OK >> "%LOG_FILE%"
+goto MODEL_DONE
+:MODEL_FAIL
+echo Failed to download SigLIP model. Check internet connection.
+echo [MODEL] FAILED >> "%LOG_FILE%"
+pause
+exit /b 1
+:MODEL_SKIP
+echo Model already downloaded (flag .venv\.model_downloaded found).
+:MODEL_DONE
 
 :: ---------- 6. Run ----------
 echo Starting Pixel...
 echo [RUN] Starting Pixel... >> "%LOG_FILE%"
-set "PIXEL_EXIT=0"
 ".venv\Scripts\python.exe" main.py ui-flet
 set "PIXEL_EXIT=%ERRORLEVEL%"
 echo [RUN] Pixel exited with code %PIXEL_EXIT% >> "%LOG_FILE%"
-if not "%PIXEL_EXIT%"=="0" (
-    echo.
-    echo [ERROR] Pixel exited with error code %PIXEL_EXIT%. See message above.
-    echo [ERROR] Pixel exited with error code %PIXEL_EXIT% >> "%LOG_FILE%"
-    pause
-    exit /b 1
-)
+if not "%PIXEL_EXIT%"=="0" goto RUN_FAIL
 
 echo.
 echo Pixel closed. Installation is complete.
@@ -209,7 +204,16 @@ echo [DONE] Pixel closed normally. >> "%LOG_FILE%"
 echo.
 echo Installation log saved to install.log.
 pause
+goto END_RUN
 
+:RUN_FAIL
+echo.
+echo [ERROR] Pixel exited with error code %PIXEL_EXIT%. See message above.
+echo [ERROR] Pixel exited with error code %PIXEL_EXIT% >> "%LOG_FILE%"
+pause
+exit /b 1
+
+:END_RUN
 endlocal
 exit /b 0
 

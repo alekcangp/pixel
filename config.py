@@ -11,7 +11,7 @@ DB_FILE = os.path.join(STORAGE_DIR, "images.db")
 DEFAULT_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"]
 
 # Минимальный размер файла в байтах (файлы меньше этого размера пропускаются).
-MIN_FILE_SIZE = 20 * 1024  # 10 КБ
+MIN_FILE_SIZE = 20 * 1024  # 20 КБ
 
 # Директории, исключаемые по умолчанию (тяжёлые/системные)
 DEFAULT_EXCLUDE_DIRS = [

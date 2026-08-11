@@ -51,16 +51,16 @@ else
 fi
 
 # ---------- 3. Python ----------
-# PyTorch и зависимости пока не поддерживают Python 3.14, поэтому
-# если версия >= 3.13 — принудительно ставим python@3.12.
+# Проект зафиксирован на Python 3.12 (python@3.12 из Homebrew).
+# Если найдена другая (в т.ч. более новая) версия — принудительно ставим python@3.12.
 if command -v python3 >/dev/null 2>&1; then
     PY_VER=$(python3 --version 2>&1 | awk '{print $2}')
     PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
     PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
     if [ "$PY_MAJOR" -gt "$REQUIRED_PYTHON_MAJOR" ] || { [ "$PY_MAJOR" -eq "$REQUIRED_PYTHON_MAJOR" ] && [ "$PY_MINOR" -ge "$REQUIRED_PYTHON_MINOR" ]; }; then
-        # Для 3.13+ принудительно переходим на 3.12 для совместимости с torch
+        # Проект зафиксирован на Python 3.12 — для более новых версий ставим python@3.12
         if [ "$PY_MAJOR" -gt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -ge 13 ]; }; then
-            log "Python $PY_VER найден, но torch пока не поддерживает 3.13+. Устанавливаю Python 3.12..."
+            log "Python $PY_VER найден, но проект зафиксирован на Python 3.12. Устанавливаю Python 3.12..."
             brew install "python@${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}"
         else
             ok "Python $PY_VER найден."

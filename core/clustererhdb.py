@@ -119,7 +119,7 @@ def _explode_mega_cluster(raw_embeddings, mega_mask):
     """Level 2: Взрыв мега-кластера через Sub-UMAP + Sub-HDBSCAN (leaf).
 
     Args:
-        raw_embeddings: np.ndarray, shape (N, 768) — raw SigLIP 2 векторы ВСЕХ точек.
+        raw_embeddings: np.ndarray, shape (N, 768) — raw SigLIP векторы ВСЕХ точек.
         mega_mask: np.ndarray, shape (N,) bool — True для точек мега-кластера.
 
     Returns:
@@ -273,7 +273,7 @@ def refine_mega_cluster(embeddings, level1_labels, level1_umap):
     переклассифицирует спасённые точки в глобальные кластеры через KNN.
 
     Args:
-        embeddings: np.ndarray, shape (N, 768) — raw SigLIP 2 векторы ВСЕХ точек.
+        embeddings: np.ndarray, shape (N, 768) — raw SigLIP векторы ВСЕХ точек.
         level1_labels: np.ndarray, shape (N,) — метки Level 1.
         level1_umap: np.ndarray, shape (N, 3) — UMAP-эмбеддинги Level 1.
 

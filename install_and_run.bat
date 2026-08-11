@@ -45,7 +45,7 @@ if not errorlevel 1 (
     set "FOUND_MINOR=0"
 )
 
-:: PyTorch does not support Python 3.13+, force install 3.12
+:: Project is pinned to Python %PYTHON_INSTALL_VER% (%REQ_MAJOR%.%REQ_MINOR%); install it if a newer version is found
 set "PYTHON_INCOMPATIBLE=0"
 if !FOUND_MAJOR! GTR 3 set "PYTHON_INCOMPATIBLE=1"
 if !FOUND_MAJOR! EQU 3 if !FOUND_MINOR! GEQ 13 set "PYTHON_INCOMPATIBLE=1"
@@ -57,7 +57,7 @@ if !FOUND_MAJOR! LSS %REQ_MAJOR% (
 )
 
 if !PYTHON_INCOMPATIBLE! EQU 1 (
-echo Python !PY_VER! found, but torch does not support 3.13+ yet. Installing Python %PYTHON_INSTALL_VER%...
+echo Python !PY_VER! found, but the project is pinned to Python %PYTHON_INSTALL_VER%. Installing Python %PYTHON_INSTALL_VER%...
     goto DOWNLOAD_PYTHON
 )
 

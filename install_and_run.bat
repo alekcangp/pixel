@@ -11,6 +11,10 @@ set "REPO_URL=https://github.com/alekcangp/pixel/archive/refs/heads/master.zip"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
 
+date /t > "%~dp0install.log"
+time /t >> "%~dp0install.log"
+echo [START] Install script started >> "%~dp0install.log"
+
 if not exist "%TEMP_DIR%" mkdir "%TEMP_DIR%"
 
 :: ---------- 0. Download project from GitHub if needed ----------
@@ -135,24 +139,30 @@ if not exist ".venv" (
 
 if !VENV_NEED_NEW! EQU 1 (
     echo Creating virtual environment...
+    echo [VENV] Creating... >> "%~dp0install.log"
     python -m venv .venv
 ) else (
     echo Virtual environment .venv already exists.
+    echo [VENV] Exists >> "%~dp0install.log"
 )
 
 call .venv\Scripts\activate.bat
 
 :: ---------- 4. Dependencies ----------
+echo [DEPS] Entering deps section >> "%~dp0install.log"
 if not exist ".venv\.deps_installed" (
     echo Installing Python dependencies...
+    echo [DEPS] Installing... >> "%~dp0install.log"
     python -m pip install --upgrade pip
     pip install -r requirements.txt
     if errorlevel 1 (
         echo Failed to install Python dependencies.
+        echo [DEPS] FAILED >> "%~dp0install.log"
         pause
         exit /b 1
     )
     type nul > .venv\.deps_installed
+    echo [DEPS] OK >> "%~dp0install.log"
 ) else (
     echo Dependencies already installed.
 )
@@ -163,29 +173,40 @@ set "TRANSFORMERS_NO_ADVISORY_WARNINGS=1"
 
 if not exist ".venv\.model_downloaded" (
     echo Downloading SigLIP model to cache...
+    echo [MODEL] Downloading... >> "%~dp0install.log"
     python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
     if errorlevel 1 (
         echo Failed to download SigLIP model. Check internet connection.
+        echo [MODEL] FAILED >> "%~dp0install.log"
         pause
         exit /b 1
     )
     type nul > .venv\.model_downloaded
+    echo [MODEL] OK >> "%~dp0install.log"
 ) else (
     echo Model already downloaded (flag .venv\.model_downloaded found).
 )
 
 :: ---------- 6. Run ----------
 echo Starting Pixel...
-python main.py ui-flet
-if errorlevel 1 (
+echo [RUN] Starting Pixel... >> "%~dp0install.log"
+set "PIXEL_EXIT=0"
+".venv\Scripts\python.exe" main.py ui-flet
+set "PIXEL_EXIT=%ERRORLEVEL%"
+echo [RUN] Pixel exited with code %PIXEL_EXIT% >> "%~dp0install.log"
+if not "%PIXEL_EXIT%"=="0" (
     echo.
-    echo Pixel exited with an error. See message above.
+    echo [ERROR] Pixel exited with error code %PIXEL_EXIT%. See message above.
+    echo [ERROR] Pixel exited with error code %PIXEL_EXIT% >> "%~dp0install.log"
     pause
     exit /b 1
 )
 
 echo.
 echo Pixel closed. Installation is complete.
+echo [DONE] Pixel closed normally. >> "%~dp0install.log"
+echo.
+echo Installation log saved to install.log.
 pause
 
 endlocal

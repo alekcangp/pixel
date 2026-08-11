@@ -1,134 +1,440 @@
 # Image Deduplication
 
-Deduplication, clustering, and semantic search for images.
+**Local-first image deduplication, clustering, and semantic search for your entire computer.**
 
-**🌐 Language:** [English](README.en.md) · [Русский](README.md)
+[English](README.en.md) · [Русский](README.md)
 
-## Screenshot
+> Organize thousands of images without manually browsing folders.
+> Scan your drives, find visually similar images, group them into clusters, search by natural language, select the images you need, and export them — all locally.
 
 ![Image Deduplication UI](screenshots/main.png)
 
-## Core Idea
+## Overview
 
-All your photos from across the whole computer — in one place. Press a single button and the app scans the entire PC and shows every image in a unified view: no need to browse folders manually. Then it runs as an automatic pipeline of several stages:
+**Image Deduplication** is a local desktop application and CLI for organizing large image collections.
 
-1. **Scanning** — finds all images across the whole PC (incrementally; only what changed is recomputed).
-2. **Cleanup** — excludes exact and visually similar duplicates (pHash + LSH).
-3. **Categorization** — automatically splits images into similar groups (HDBSCAN + UMAP).
-4. **Visual selection** — convenient browsing and selection of the photos you need in the desktop UI.
-5. **Export** — exports the selected set.
+Instead of opening folders one by one, the application builds a unified local index of your images and processes them through several stages:
 
-Everything runs locally (no data uploaded to the cloud) and automatically. It doesn't require a powerful GPU: where a GPU is available, acceleration is used (CUDA on NVIDIA, MPS on Apple Silicon), otherwise CPU. Both a Flet desktop UI and a CLI are available.
+```text
+Scan
+  ↓
+Perceptual deduplication
+  ↓
+Image embeddings
+  ↓
+Semantic clustering
+  ↓
+Visual selection
+  ↓
+Export
+```
+
+The application stores its index and metadata locally and does not require uploading your images to a cloud service.
 
 ## Features
 
-- Incremental directory scanning
-- Deduplication via perceptual hash (pHash + LSH)
-- Semantic text search (SigLIP 2 + FAISS)
-- Clustering (HDBSCAN + UMAP)
-- Desktop UI built with Flet
+* 🔎 **Incremental scanning** — only new or changed files are reprocessed.
+* 🧹 **Perceptual deduplication** — finds visually similar images using pHash + LSH.
+* 🧠 **Semantic search** — search images using natural-language queries with SigLIP and FAISS.
+* 🗂️ **Automatic clustering** — groups visually/semantically related images using UMAP + HDBSCAN.
+* 🖥️ **Desktop UI** — interactive gallery built with Flet.
+* 🖱️ **Visual selection** — select individual images or entire groups.
+* 📦 **Export** — copy selected images to a destination folder.
+* 💾 **Local processing** — image data and the local index remain on your machine.
+* ⚡ **GPU acceleration** — CUDA is used on supported NVIDIA systems; MPS is used on Apple Silicon; otherwise CPU is used.
+
+## How it works
+
+### 1. Scan
+
+The scanner recursively walks the selected directories and indexes supported image files.
+
+Supported extensions by default:
+
+* JPEG / JPG
+* PNG
+* WebP
+* BMP
+* GIF
+* TIFF
+
+Scanning is incremental and tracks file metadata/content information so unchanged files do not need to be processed again.
+
+The GUI can scan all available disks, while system, cache, development, and other service directories are excluded by default.
+
+### 2. Deduplication
+
+Each image is converted into a perceptual hash (pHash).
+
+A Locality-Sensitive Hashing (LSH) index is then used to efficiently find hashes within a configurable Hamming-distance threshold.
+
+The current default threshold is:
+
+```text
+pHash Hamming distance <= 3
+```
+
+Similar hashes are grouped using Union-Find.
+
+The deduplication stage can optionally move all but one file from each similar group to another directory.
+
+> **Important:** pHash detects perceptual similarity. It is not an exact byte-for-byte file comparison.
+
+### 3. Image embeddings
+
+For semantic search and clustering, images are converted into embeddings using:
+
+```text
+google/siglip-base-patch16-224
+```
+
+The embeddings are stored locally and can be reused between runs.
+
+The application automatically selects the best available PyTorch device:
+
+```text
+NVIDIA GPU → CUDA
+Apple Silicon → MPS
+otherwise   → CPU
+```
+
+### 4. Clustering
+
+Image embeddings are reduced with UMAP and clustered with HDBSCAN.
+
+The implementation also contains additional processing for large clusters and noisy points.
+
+Clustering is automatically performed by the desktop workflow after embeddings are generated.
+
+### 5. Search
+
+Semantic search accepts natural-language queries such as:
+
+```text
+cat on a window
+mountains at sunset
+people on the beach
+red car
+```
+
+The text query is embedded and compared with image embeddings using a FAISS inner-product index.
+
+### 6. Select and export
+
+The desktop UI provides a gallery for reviewing images.
+
+You can:
+
+* select individual images;
+* select all images in a group;
+* inspect images in a larger preview;
+* search the indexed collection;
+* review selected files;
+* export selected files to a directory.
 
 ## Requirements
 
-- Python 3.12 (recommended)
-- pip
+* Python **3.12** recommended
+* pip
+* Internet connection for the initial model download
+
+For semantic search, embeddings, and the desktop UI, PyTorch and the Hugging Face model are required.
 
 ## Installation
 
-### Automatic install (recommended)
+### macOS
 
-The easiest way is to run the automatic install script:
+The repository includes an automatic installer for macOS:
 
-**macOS / Linux:**
 ```bash
 chmod +x install_and_run.command
 ./install_and_run.command
 ```
 
-The script will install Xcode Command Line Tools, Homebrew, Python 3.12, the virtual environment, dependencies, and download the SigLIP model.
+The installer creates a Python 3.12 virtual environment, installs dependencies, downloads the SigLIP model, and starts the Flet desktop application.
 
-**Windows:**
+> The bundled `.command` installer is currently intended for macOS. For Linux, use the manual installation procedure below.
+
+### Windows
+
+Run:
+
 ```bat
 install_and_run.bat
 ```
 
-The script will install Python 3.12, the Visual C++ Redistributable, the virtual environment, dependencies, and download the SigLIP model.
+The Windows installer downloads/configures Python 3.12 when necessary, installs the required runtime components and Python dependencies, downloads the model, and starts the application.
 
-### Manual install
+### Manual installation
 
-If the automatic install isn't suitable:
+Clone the repository:
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate.bat   # Windows (cmd.exe or PowerShell)
-source .venv/bin/activate     # macOS / Linux
-
-pip install -r requirements.txt
+git clone https://github.com/alekcangp/pixel.git
+cd pixel
 ```
 
-Download the SigLIP model (required for `ui-flet`, `embed`, `search`):
+Create a virtual environment.
+
+**Windows — Command Prompt:**
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate.bat
+```
+
+**Windows — PowerShell:**
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**macOS / Linux:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Download the image-text model:
 
 ```bash
 python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
 ```
 
-## Usage
+## Quick Start
 
-### Desktop UI
+### Desktop application
 
 ```bash
 python main.py ui-flet
 ```
 
-The UI (see the screenshot above) is available after installing dependencies and loading the SigLIP model.
+The desktop UI provides scanning, deduplication, clustering, semantic search, image selection, and export in one workflow.
 
 ### CLI
 
+#### Scan a directory
+
 ```bash
-# Scan a directory
 python main.py scan --path "/path/to/folder"
+```
 
-# Full recompute (instead of incremental)
+#### Force a full rescan
+
+```bash
 python main.py scan --path "/path/to/folder" --full
+```
 
-# Scan with extension filter and exclusions
-python main.py scan --path "/path/to/folder" --ext "jpg,png,webp" --exclude "tmp,cache"
+#### Scan with extensions and exclusions
 
-# Deduplication
-python main.py dedup
+```bash
+python main.py scan \
+  --path "/path/to/folder" \
+  --ext "jpg,png,webp" \
+  --exclude "tmp,cache"
+```
 
-# Deduplication with moving duplicates
-python main.py dedup --move "/path/to/duplicates"
+#### Change the minimum file size
 
-# Scan + deduplication in one pass
+The default minimum file size is **20 KiB**.
+
+```bash
+python main.py scan --path "/path/to/folder" --min-size 5
+```
+
+The value is specified in KiB.
+
+#### Scan and deduplicate
+
+```bash
 python main.py run --path "/path/to/folder"
+```
 
-# Clear the database
-python main.py clear
+#### Deduplicate the indexed collection
 
-# Embeddings (requires PyTorch)
+```bash
+python main.py dedup
+```
+
+#### Deduplicate and move duplicates
+
+```bash
+python main.py dedup --move "/path/to/duplicates"
+```
+
+The application keeps one canonical file from each similar-image group and moves the remaining files to the destination directory.
+
+#### Generate embeddings
+
+```bash
 python main.py embed
+```
 
-# Clustering
+Force regeneration:
+
+```bash
+python main.py embed --full
+```
+
+#### Cluster images
+
+```bash
 python main.py cluster-hdb
+```
 
-# Semantic search (requires PyTorch)
-python main.py search "cat on the windowsill"
+#### Semantic search
 
-# Semantic search with a custom result count
-python main.py search "cat on the windowsill" --top-k 10
+```bash
+python main.py search "cat on a window"
+```
 
-# Search for similar images by pHash
+Limit the number of results:
+
+```bash
+python main.py search "cat on a window" --top-k 10
+```
+
+#### Search by visual similarity
+
+```bash
 python main.py phash-search "/path/to/image.jpg"
+```
 
-# Search for similar images by pHash with a custom result count
+Limit the number of results:
+
+```bash
 python main.py phash-search "/path/to/image.jpg" --top-k 10
 ```
 
-## Notes
+#### Clear the local database
 
-- The `scan`, `dedup`, `run`, `clear`, and `cluster-hdb` commands work **without PyTorch**.
-- The `embed`, `search`, and `phash-search` commands require an installed `torch`.
-- Incremental mode is used by default. Add `--full` for a full recompute.
-- MPS is used automatically on Apple Silicon, CUDA on NVIDIA, CPU otherwise.
-- The default minimum file size is 10 KB. Use `--min-size` to change it.
+```bash
+python main.py clear
+```
+
+> `clear` removes the local image index and stored application state. It does not delete your original image files.
+## CLI commands
+
+| Command        | Description                          |
+| -------------- | ------------------------------------ |
+| `ui-flet`      | Launch the desktop application       |
+| `scan`         | Scan and index images                |
+| `run`          | Scan and deduplicate in one workflow |
+| `dedup`        | Find perceptually similar images     |
+| `embed`        | Generate image embeddings            |
+| `cluster-hdb`  | Cluster image embeddings             |
+| `search`       | Semantic text-to-image search        |
+| `phash-search` | Search visually similar images       |
+| `clear`        | Clear the local database and index   |
+
+## Project structure
+
+```text
+.
+├── core/
+│   ├── database.py
+│   ├── scanner.py
+│   ├── dedup.py
+│   ├── embedder.py
+│   ├── search.py
+│   ├── clustererhdb.py
+│   └── thumbnail_cache.py
+├── screenshots/
+├── app_flet.py
+├── config.py
+├── main.py
+├── requirements.txt
+├── install_and_run.command
+├── install_and_run.bat
+├── uninstall.command
+├── uninstall.bat
+├── README.md
+└── README.en.md
+```
+
+## Local storage
+
+The application keeps its local database and generated data under:
+
+```text
+storage/
+```
+
+The main SQLite database is:
+
+```text
+storage/images.db
+```
+
+The original image files are not copied into the database.
+
+## Performance and hardware
+
+The application is designed to work without a dedicated GPU.
+
+### CPU
+
+All major workflows can run on CPU, although embedding generation can be significantly slower for large collections.
+
+### NVIDIA
+
+When CUDA is available, PyTorch uses the NVIDIA GPU for embedding generation.
+
+### Apple Silicon
+
+On supported Apple Silicon systems, PyTorch uses Apple's MPS backend.
+
+If available GPU memory is insufficient, the embedding implementation can fall back to CPU.
+
+## Notes and limitations
+
+* The project currently uses **SigLIP**, not SigLIP 2.
+* pHash is designed for perceptual similarity and may group images that are not byte-identical.
+* The default pHash threshold is relatively strict (`3`) and can be adjusted in `config.py`.
+* System and service directories are excluded by default when scanning.
+* The desktop workflow automatically runs embeddings and clustering after scanning.
+* The standard `requirements.txt` installs PyTorch, even though several CLI operations are implemented so that they can work without importing PyTorch.
+* The first semantic-search/embedding run downloads the model from Hugging Face.
+* The project is local-first, but the initial model download requires network access.
+
+## Configuration
+
+Most processing parameters can be adjusted in `config.py`, including:
+
+* supported image extensions;
+* excluded directories;
+* minimum file size;
+* pHash threshold;
+* embedding batch size;
+* UMAP parameters;
+* HDBSCAN parameters;
+* semantic-search result limits.
+
+## Development
+
+The CLI entry point is:
+
+```bash
+python main.py --help
+```
+
+The processing pipeline is shared between the CLI and the Flet desktop application.
+
+## License
+
+Add the project's license here once a `LICENSE` file is included in the repository.
+
+## Language
+
+* [English](README.en.md)
+* [Русский](README.md)
+Export copies the original files rather than modifying the source images.

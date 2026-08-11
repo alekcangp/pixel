@@ -97,6 +97,16 @@ echo Installed Python !PY_VER!
 
 :INSTALL_VC
 :: ---------- 2. Visual C++ Redistributable ----------
+:: Skip if already installed (avoid 2-min re-download every run)
+if "%ARCH%"=="win32" (
+    reg query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86" /v Installed 2>nul | find "0x1" >nul
+) else (
+    reg query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" /v Installed 2>nul | find "0x1" >nul
+)
+if not errorlevel 1 (
+    echo Visual C++ Redistributable already installed. Skipping.
+    goto VENV_SETUP
+)
 echo Checking Visual C++ Redistributable...
 set "VC_EXE=%TEMP_DIR%\vc_redist.exe"
 if /i "%ARCH%"=="ARM64" (
@@ -137,6 +147,11 @@ if not exist ".venv\.deps_installed" (
     echo Installing Python dependencies...
     python -m pip install --upgrade pip
     pip install -r requirements.txt
+    if errorlevel 1 (
+        echo Failed to install Python dependencies.
+        pause
+        exit /b 1
+    )
     type nul > .venv\.deps_installed
 ) else (
     echo Dependencies already installed.
@@ -149,6 +164,11 @@ set "TRANSFORMERS_NO_ADVISORY_WARNINGS=1"
 if not exist ".venv\.model_downloaded" (
     echo Downloading SigLIP model to cache...
     python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
+    if errorlevel 1 (
+        echo Failed to download SigLIP model. Check internet connection.
+        pause
+        exit /b 1
+    )
     type nul > .venv\.model_downloaded
 ) else (
     echo Model already downloaded (flag .venv\.model_downloaded found).
@@ -157,6 +177,10 @@ if not exist ".venv\.model_downloaded" (
 :: ---------- 6. Run ----------
 echo Starting Pixel...
 python main.py ui-flet
+if errorlevel 1 (
+    echo Pixel exited with an error. See message above.
+    pause
+)
 
 endlocal
 exit /b 0

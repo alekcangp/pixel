@@ -178,9 +178,15 @@ if not exist ".venv\.model_downloaded" (
 echo Starting Pixel...
 python main.py ui-flet
 if errorlevel 1 (
+    echo.
     echo Pixel exited with an error. See message above.
     pause
+    exit /b 1
 )
+
+echo.
+echo Pixel closed. Installation is complete.
+pause
 
 endlocal
 exit /b 0

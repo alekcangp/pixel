@@ -10,7 +10,7 @@ Deduplication, clustering, and semantic search for images.
 
 ## Core Idea
 
-The app automates working with a large photo collection across your whole computer as a pipeline of several stages:
+All your photos from across the whole computer — in one place. Press a single button and the app scans the entire PC and shows every image in a unified view: no need to browse folders manually. Then it runs as an automatic pipeline of several stages:
 
 1. **Scanning** — finds all images across the whole PC (incrementally; only what changed is recomputed).
 2. **Cleanup** — excludes exact and visually similar duplicates (pHash + LSH).

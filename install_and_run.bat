@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
@@ -13,22 +13,22 @@ set "PYTHONUTF8=1"
 
 if not exist "%TEMP_DIR%" mkdir "%TEMP_DIR%"
 
-:: ---------- 0. Скачивание проекта с GitHub, если нет ----------
+:: ---------- 0. Download project from GitHub if needed ----------
 if not exist "%~dp0pixel\main.py" (
     echo Project not found. Downloading from GitHub...
     powershell -Command "& {Invoke-WebRequest -Uri '%REPO_URL%' -OutFile '%REPO_ZIP%' -UseBasicParsing}"
     echo Extracting...
     powershell -Command "& {Expand-Archive -Path '%REPO_ZIP%' -DestinationPath '%~dp0' -Force}"
-    :: GitHub создает папку pixel-master, переименовываем в pixel
+    :: GitHub creates pixel-master folder, rename to pixel
     if exist "%~dp0pixel-master" (
         ren "%~dp0pixel-master" pixel
     )
 )
 
-:: Переходим в папку проекта
+:: Change to project folder
 cd /d "%~dp0pixel"
 
-:: ---------- 1. Проверка / установка Python ----------
+:: ---------- 1. Check / install Python ----------
 python --version >nul 2>&1
 if not errorlevel 1 (
     for /f "tokens=2 delims= " %%i in ('python --version 2^>^&1') do set "PY_VER=%%i"
@@ -40,7 +40,7 @@ if not errorlevel 1 (
     set "FOUND_MINOR=0"
 )
 
-:: PyTorch пока не поддерживает Python 3.13+, поэтому принудительно ставим 3.12
+:: PyTorch does not support Python 3.13+, force install 3.12
 set "PYTHON_INCOMPATIBLE=0"
 if !FOUND_MAJOR! GTR 3 set "PYTHON_INCOMPATIBLE=1"
 if !FOUND_MAJOR! EQU 3 if !FOUND_MINOR! GEQ 13 set "PYTHON_INCOMPATIBLE=1"
@@ -61,7 +61,7 @@ goto INSTALL_VC
 :DOWNLOAD_PYTHON
 echo Python %REQ_MAJOR%.%REQ_MINOR%+ not found. Downloading Python %PYTHON_INSTALL_VER%...
 
-:: Определяем архитектуру
+:: Detect architecture
 set "ARCH=AMD64"
 if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=ARM64"
 if /i "%PROCESSOR_ARCHITECTURE%"=="x86" set "ARCH=win32"
@@ -75,17 +75,17 @@ if "%ARCH%"=="AMD64" (
     set "PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_INSTALL_VER%/python-%PYTHON_INSTALL_VER%-arm64.exe"
 )
 
-:: Скачиваем через PowerShell (curl в Windows иногда вызывает проблемы)
+:: Download via PowerShell (curl problematic on Windows)
 powershell -Command "& {Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%PYTHON_EXE%' -UseBasicParsing}"
 
 echo Installing Python...
-:: /quiet — тихая установка, InstallAllUsers=1 — для всех пользователей, PrependPath=1 — добавить в PATH
+:: /quiet silent, InstallAllUsers=1 all users, PrependPath=1 add to PATH
 start /wait "" "%PYTHON_EXE%" /quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 Include_test=0
 
-:: Обновляем PATH
+:: Refresh PATH
 call :RefreshEnv
 
-:: Проверяем
+:: Verify
 python --version >nul 2>&1
 if errorlevel 1 (
     echo Failed to install Python. Install it manually.
@@ -117,7 +117,7 @@ set "VENV_NEED_NEW=0"
 if not exist ".venv" (
     set "VENV_NEED_NEW=1"
 ) else (
-    :: Если venv создан не под python3.12 — пересоздаём
+    :: Recreate if venv was built for a python other than 3.12
     if not exist ".venv\Scripts\python.exe" (
         set "VENV_NEED_NEW=1"
     )
@@ -132,7 +132,7 @@ if !VENV_NEED_NEW! EQU 1 (
 
 call .venv\Scripts\activate.bat
 
-:: ---------- 4. Зависимости ----------
+:: ---------- 4. Dependencies ----------
 if not exist ".venv\.deps_installed" (
     echo Installing Python dependencies...
     python -m pip install --upgrade pip
@@ -142,7 +142,7 @@ if not exist ".venv\.deps_installed" (
     echo Dependencies already installed.
 )
 
-:: ---------- 5. Модель SigLIP ----------
+:: ---------- 5. SigLIP model ----------
 set "HF_HUB_DISABLE_TELEMETRY=1"
 set "TRANSFORMERS_NO_ADVISORY_WARNINGS=1"
 
@@ -154,7 +154,7 @@ if not exist ".venv\.model_downloaded" (
     echo Model already downloaded (flag .venv\.model_downloaded found).
 )
 
-:: ---------- 6. Запуск ----------
+:: ---------- 6. Run ----------
 echo Starting Pixel...
 python main.py ui-flet
 
@@ -162,7 +162,7 @@ endlocal
 exit /b 0
 
 :RefreshEnv
-:: Обновляем PATH из реестра
+:: Refresh PATH from registry
 for /f "skip=2 tokens=*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do (
     set "NEW_PATH=%%a"
 )

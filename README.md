@@ -2,6 +2,22 @@
 
 Дедупликация, кластеризация и семантический поиск изображений.
 
+**🌐 Язык:** [Русский](README.md) · [English](README.en.md)
+
+## Скриншот
+
+![Image Deduplication UI](screenshots/main.png)
+
+## Основная идея
+
+Единый локальный инструмент для управления библиотекой изображений, объединяющий три задачи в одном приложении:
+
+- **Дедупликация** — находит точные и визуально похожие дубликаты по перцептивному хэшу (pHash + LSH), а не просто одинаковые файлы.
+- **Семантический поиск** — ищет изображения по описанию на естественном языке (SigLIP 2 + FAISS), а не только по имени файла.
+- **Автокластеризация** — группирует похожие изображения (HDBSCAN + UMAP), помогая навести порядок в больших коллекциях.
+
+Всё работает локально (без загрузки данных в облако) и инкрементально (пересчитывается только изменившееся). Не требует мощной видеокарты: где есть GPU, используется ускорение (CUDA на NVIDIA, MPS на macOS Silicon), в остальных случаях — CPU. Доступны и десктопный интерфейс на Flet, и CLI.
+
 ## Возможности
 
 - Сканирование директорий с инкрементальным обновлением
@@ -54,10 +70,6 @@ pip install -r requirements.txt
 python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
 ```
 
-> **Windows + PowerShell:** используйте `.venv\Scripts\activate.bat` (не `Activate.ps1`).
-> Если PowerShell блокирует скрипты ошибкой «выполнение сценариев отключено», выполните один раз:
-> `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
-
 ### macOS
 
 На macOS Silicon (`arm64`) PyTorch автоматически использует MPS. На Intel (`x86_64`) используется CPU.
@@ -88,6 +100,8 @@ winget install Python.Python.3.12
 ```bash
 python main.py ui-flet
 ```
+
+Интерфейс (см. скриншот выше) доступен после установки зависимостей и загрузки модели SigLIP.
 
 ### CLI
 

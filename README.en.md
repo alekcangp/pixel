@@ -70,29 +70,6 @@ Download the SigLIP model (required for `ui-flet`, `embed`, `search`):
 python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
 ```
 
-### macOS
-
-On Apple Silicon (`arm64`) PyTorch automatically uses MPS. On Intel (`x86_64`) it uses CPU.
-
-Python 3.12 from python.org or Homebrew is recommended:
-
-```bash
-brew install python@3.12
-```
-
-### Windows
-
-Python 3.12 from [python.org](https://www.python.org/downloads/windows/) or winget is recommended:
-
-```bash
-winget install Python.Python.3.12
-```
-
-Visual C++ Redistributable may be required for Flet desktop mode.
-
-> **Note:** to activate the venv always use `activate.bat` (not `Activate.ps1`),
-> or enable PowerShell scripts: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`.
-
 ## Usage
 
 ### Desktop UI

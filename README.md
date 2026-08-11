@@ -70,29 +70,6 @@ pip install -r requirements.txt
 python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
 ```
 
-### macOS
-
-На macOS Silicon (`arm64`) PyTorch автоматически использует MPS. На Intel (`x86_64`) используется CPU.
-
-Рекомендуется Python 3.12 от python.org или через Homebrew:
-
-```bash
-brew install python@3.12
-```
-
-### Windows
-
-Рекомендуется Python 3.12 с [python.org](https://www.python.org/downloads/windows/) или через winget:
-
-```bash
-winget install Python.Python.3.12
-```
-
-Может потребоваться Visual C++ Redistributable для Flet desktop mode.
-
-> **Примечание:** для активации venv всегда используйте `activate.bat` (не `Activate.ps1`),
-> либо разрешите скрипты PowerShell: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`.
-
 ## Использование
 
 ### Desktop UI

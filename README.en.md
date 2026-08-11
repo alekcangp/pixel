@@ -10,13 +10,15 @@ Deduplication, clustering, and semantic search for images.
 
 ## Core Idea
 
-A single local tool for managing your image library that combines three tasks in one application:
+The app automates working with a large photo collection across your whole computer as a pipeline of several stages:
 
-- **Deduplication** — finds exact and visually similar duplicates using perceptual hashing (pHash + LSH), not just identical files.
-- **Semantic search** — finds images by natural-language descriptions (SigLIP 2 + FAISS), not just by filename.
-- **Auto-clustering** — groups similar images (HDBSCAN + UMAP) to help you organize large collections.
+1. **Scanning** — finds all images across the whole PC (incrementally; only what changed is recomputed).
+2. **Cleanup** — excludes exact and visually similar duplicates (pHash + LSH).
+3. **Categorization** — automatically splits images into similar groups (HDBSCAN + UMAP).
+4. **Visual selection** — convenient browsing and selection of the photos you need in the desktop UI.
+5. **Export** — exports the selected set.
 
-Everything runs locally (no data uploaded to the cloud) and incrementally (only what changed is recomputed). It doesn't require a powerful GPU: where a GPU is available, acceleration is used (CUDA on NVIDIA, MPS on Apple Silicon), otherwise CPU. Both a Flet desktop UI and a CLI are available.
+Everything runs locally (no data uploaded to the cloud) and automatically. It doesn't require a powerful GPU: where a GPU is available, acceleration is used (CUDA on NVIDIA, MPS on Apple Silicon), otherwise CPU. Both a Flet desktop UI and a CLI are available.
 
 ## Features
 

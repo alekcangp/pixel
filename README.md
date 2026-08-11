@@ -48,6 +48,12 @@ source .venv/bin/activate     # macOS / Linux
 pip install -r requirements.txt
 ```
 
+Скачать модель SigLIP (необходима для `ui-flet`, `embed`, `search`):
+
+```bash
+python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
+```
+
 > **Windows + PowerShell:** используйте `.venv\Scripts\activate.bat` (не `Activate.ps1`).
 > Если PowerShell блокирует скрипты ошибкой «выполнение сценариев отключено», выполните один раз:
 > `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`

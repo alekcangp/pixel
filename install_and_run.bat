@@ -1,9 +1,4 @@
 @echo off
-rem --- Keep the console window open even if the script fails ---
-if not "%~1"=="wrapped" (
-    start "Pixel Installer" cmd /k ""%~f0" wrapped %*"
-    exit /b
-)
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 

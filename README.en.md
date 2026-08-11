@@ -397,7 +397,6 @@ If available GPU memory is insufficient, the embedding implementation can fall b
 
 ## Notes and limitations
 
-* The project currently uses **SigLIP**, not SigLIP 2.
 * pHash is designed for perceptual similarity and may group images that are not byte-identical.
 * The default pHash threshold is relatively strict (`3`) and can be adjusted in `config.py`.
 * System and service directories are excluded by default when scanning.
@@ -405,6 +404,7 @@ If available GPU memory is insufficient, the embedding implementation can fall b
 * The standard `requirements.txt` installs PyTorch, even though several CLI operations are implemented so that they can work without importing PyTorch.
 * The first semantic-search/embedding run downloads the model from Hugging Face.
 * The project is local-first, but the initial model download requires network access.
+* Export copies the original files rather than modifying the source images.
 
 ## Configuration
 
@@ -437,4 +437,3 @@ Add the project's license here once a `LICENSE` file is included in the reposito
 
 * [English](README.en.md)
 * [Русский](README.md)
-Export copies the original files rather than modifying the source images.

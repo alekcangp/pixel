@@ -1,21 +1,23 @@
 import os
 
-# Пути
+# Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 
-# База данных SQLite (вместо отдельных JSON/npy-файлов)
+# SQLite database
 DB_FILE = os.path.join(STORAGE_DIR, "images.db")
 
-# Сканирование
+# Scanning
 DEFAULT_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"]
 
-# Минимальный размер файла в байтах (файлы меньше этого размера пропускаются).
-MIN_FILE_SIZE = 20 * 1024  # 20 КБ
+# Minimum file size in bytes.
+# Files smaller than this value are skipped.
+MIN_FILE_SIZE = 20 * 1024  # 20 KiB
 
-# Директории, исключаемые по умолчанию (тяжёлые/системные)
+# Directories excluded by default.
+# These are typically system, cache, development, or dependency directories.
 DEFAULT_EXCLUDE_DIRS = [
-    # --- Системные Windows ---
+    # Windows system directories
     "Windows",
     "System32",
     "SysWOW64",
@@ -32,7 +34,7 @@ DEFAULT_EXCLUDE_DIRS = [
     "$WINDOWS.~BT",
     "$WINDOWS.~WS",
 
-    # --- Системные macOS ---
+    # macOS system directories
     "System",
     "Library",
     "Applications",
@@ -46,7 +48,7 @@ DEFAULT_EXCLUDE_DIRS = [
     "Mobile Documents",
     "Photos Library.photoslibrary",
 
-    # --- Временные файлы и Корзина ---
+    # Temporary files and trash
     "Temp",
     "tmp",
     ".cache",
@@ -54,7 +56,7 @@ DEFAULT_EXCLUDE_DIRS = [
     ".Trash",
     ".Trashes",
 
-    # --- Разработка и Сборка (Зависимости) ---
+    # Development and build directories
     ".git",
     ".svn",
     ".hg",
@@ -77,74 +79,76 @@ DEFAULT_EXCLUDE_DIRS = [
     "out",
     "target",
     ".idea",
-    ".vscode"
+    ".vscode",
 ]
 
-# Дедупликация
-PHASH_THRESHOLD = 3            # порог Hamming distance для pHash
+# Perceptual deduplication
+# Maximum Hamming distance between pHash values considered similar.
+PHASH_THRESHOLD = 3
 
-
-# Эмбеддинги
+# Image embeddings
 SIGLIP_MODEL = "google/siglip-base-patch16-224"
 EMBED_BATCH_SIZE = 16
 EMBED_IMAGE_SIZE = 224
 
-# Кластеризация
+# Clustering
 CLUSTER_MIN_CLUSTERS = 2
 CLUSTER_RANDOM_STATE = 42
 
+# UMAP parameters
+UMAP_N_COMPONENTS = 3
+UMAP_MIN_DIST = 0.0
+UMAP_METRIC = "cosine"
+UMAP_N_NEIGHBORS = 20
 
-# UMAP параметры для снижения размерности
-UMAP_N_COMPONENTS = 3          # Целевая размерность после UMAP
-UMAP_MIN_DIST = 0.0            # Минимальное расстояние между точками
-UMAP_METRIC = "cosine"         # Метрика для UMAP
-UMAP_N_NEIGHBORS = 20          # Увеличено с 15: более глобальная структура, меньше шума
+# HDBSCAN parameters
+HDBSCAN_MIN_CLUSTER_SIZE = 15
+HDBSCAN_MIN_SAMPLES = 3
+HDBSCAN_SELECTION_METHOD = "eom"
 
-# HDBSCAN параметры
-HDBSCAN_MIN_CLUSTER_SIZE = 15   # Уменьшено с 25: больше мелких кластеров, меньше шума
-HDBSCAN_MIN_SAMPLES = 3         # Уменьшено с 5: менее строгий порог плотности
-HDBSCAN_SELECTION_METHOD = "eom"  # Excess of Mass для переменной плотности
-
-# Автоматическая кластеризация после сканирования
+# Automatically run clustering after scanning/embedding.
 AUTO_CLUSTER_AFTER_SCAN = True
 
+# ============================================================
+# Level 2: Mega-cluster refinement
+# ============================================================
 
-# ============================================================
-# Level 2: Взрыв мега-кластера (иерархическая кластеризация)
-# ============================================================
 MEGA_CLUSTER_THRESHOLD = 0.07
 
-# Sub-UMAP: жёсткая локальная проекция для выявления микро-структур
-SUB_UMAP_N_NEIGHBORS = 10       # Локальное фракционирование
-SUB_UMAP_N_COMPONENTS = 2       # Строгая топологическая проекция (плотность)
+# Local UMAP projection for detecting micro-structures.
+SUB_UMAP_N_NEIGHBORS = 10
+SUB_UMAP_N_COMPONENTS = 2
 SUB_UMAP_MIN_DIST = 0.0
 SUB_UMAP_METRIC = "cosine"
 
-# Sub-HDBSCAN: извлечение только острых пиков плотности
-SUB_HDBSCAN_MIN_CLUSTER_SIZE = 20  # Верхняя граница, адаптируется вниз
+# Sub-HDBSCAN: extract dense local structures.
+SUB_HDBSCAN_MIN_CLUSTER_SIZE = 20
 SUB_HDBSCAN_MIN_SAMPLES = 5
-SUB_HDBSCAN_SELECTION_METHOD = "leaf"  # Срезает пики, плоский фон → шум -1
+SUB_HDBSCAN_SELECTION_METHOD = "leaf"
 
 # ============================================================
-# KNN Rescue: переклассификация спасённых точек
+# KNN rescue
 # ============================================================
+
 KNN_N_NEIGHBORS = 5
 KNN_METRIC = "euclidean"
 
-# Метка для подтверждённого визуального мусора (не путать с шумом -1)
+# Label used for confirmed visual garbage.
+# This is different from the HDBSCAN noise label (-1).
 GARBAGE_LABEL = -2
 
 # ============================================================
-# Noise Rescue: присоединение шумовых точек к ближайшим кластерам
+# Noise rescue
 # ============================================================
-# Порог (доля от всех точек), при котором шум считается избыточным
-# и запускается пост-обработка шума через KNN.
-NOISE_RESCUE_THRESHOLD = 0.15   # Если шум > 15% — запускаем rescue
-# Максимальное расстояние (в UMAP-пространстве) для присоединения шумовой
-# точки к кластеру. Точки дальше этого порога остаются шумом.
+
+# If more than this fraction of points are classified as noise,
+# the KNN-based noise rescue step is enabled.
+NOISE_RESCUE_THRESHOLD = 0.15
+
+# Maximum distance in UMAP space for assigning a noise point
+# to a nearby cluster.
 NOISE_RESCUE_MAX_DIST = 0.5
 
-
-# Поиск
+# Semantic search
 SEARCH_TOP_K = 10
 SEARCH_THRESHOLD = 0.05

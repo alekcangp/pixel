@@ -42,11 +42,15 @@ install_and_run.bat
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate   # Windows
-source .venv/bin/activate   # macOS / Linux
+.venv\Scripts\activate.bat   # Windows (cmd.exe или PowerShell)
+source .venv/bin/activate     # macOS / Linux
 
 pip install -r requirements.txt
 ```
+
+> **Windows + PowerShell:** используйте `.venv\Scripts\activate.bat` (не `Activate.ps1`).
+> Если PowerShell блокирует скрипты ошибкой «выполнение сценариев отключено», выполните один раз:
+> `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
 
 ### macOS
 
@@ -67,6 +71,9 @@ winget install Python.Python.3.12
 ```
 
 Может потребоваться Visual C++ Redistributable для Flet desktop mode.
+
+> **Примечание:** для активации venv всегда используйте `activate.bat` (не `Activate.ps1`),
+> либо разрешите скрипты PowerShell: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`.
 
 ## Использование
 

@@ -302,11 +302,14 @@ class ImageDedupApp:
         self.stat_duplicates_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
         self.stat_unique = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
         self.stat_unique_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.stat_selected = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
+        self.stat_selected_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
         
         self.stats_title_text = ft.Text(tr("stat.title"), size=18, weight=ft.FontWeight.BOLD)
         self.stat_total_label = ft.Text(tr("stat.total"), size=12)
         self.stat_dupes_label = ft.Text(tr("stat.dupes"), size=12)
         self.stat_unique_label = ft.Text(tr("stat.unique"), size=12)
+        self.stat_selected_label = ft.Text(tr("stat.selected"), size=12)
         
         return ft.Column(
             [
@@ -325,6 +328,11 @@ class ImageDedupApp:
                         ),
                         ft.Column(
                             [self.stat_unique, self.stat_unique_size, self.stat_unique_label],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        ft.Column(
+                            [self.stat_selected, self.stat_selected_size, self.stat_selected_label],
                             alignment=ft.MainAxisAlignment.CENTER,
                             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
@@ -599,6 +607,18 @@ class ImageDedupApp:
             except Exception:
                 self.stat_duplicates_size.value = "—"
                 self.stat_unique_size.value = "—"
+            
+            # Обновляем статистику выбранных файлов
+            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
+            total_files = len(selected_paths)
+            total_size_bytes = 0
+            for path in selected_paths:
+                try:
+                    total_size_bytes += os.path.getsize(path)
+                except:
+                    pass
+            self.stat_selected.value = str(total_files)
+            self.stat_selected_size.value = _format_size(total_size_bytes)
             
             # Загрузить кластеры и их имена
             clusters, cluster_names = database.load_clusters_with_names()
@@ -1003,6 +1023,8 @@ class ImageDedupApp:
         self.stat_duplicates_size.value = "0 " + tr("unit.B")
         self.stat_unique.value = "0"
         self.stat_unique_size.value = "0 " + tr("unit.B")
+        self.stat_selected.value = "0"
+        self.stat_selected_size.value = "0 " + tr("unit.B")
         
         self.update_clusters_list()
         
@@ -1053,36 +1075,6 @@ class ImageDedupApp:
         # Выбранные файлы (только существующие)
         selected_paths = [p for p in self.selected_images if os.path.exists(p)]
         selected_paths.sort()
-        
-        total_files = len(selected_paths)
-        
-        # Вычисляем общий размер выбранных файлов
-        total_size_bytes = 0
-        for path in selected_paths:
-            try:
-                total_size_bytes += os.path.getsize(path)
-            except:
-                pass
-        
-        # Конвертируем в читаемый формат
-        size_str = _format_size(total_size_bytes)
-        
-        # Статистика выбранных файлов
-        self.export_selected_count_text = ft.Text(str(total_files), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
-        self.export_total_size_text = ft.Text(size_str, size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
-        stats_row = ft.Row(
-            [
-                ft.Column(
-                    [self.export_selected_count_text, ft.Text(tr("export.selected_files"), size=12)],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
-                ft.Column(
-                    [self.export_total_size_text, ft.Text(tr("export.total_size"), size=12)],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_AROUND,
-        )
         
         # Поле папки назначения - восстанавливаем сохранённый путь или используем значение по умолчанию
         saved_export_path = getattr(self, '_export_dest_folder_path', None) or getattr(self.page.session, 'export_dest_folder', None)
@@ -1141,19 +1133,19 @@ class ImageDedupApp:
         if selected_paths:
             # Показываем индикатор загрузки пока генерируются миниатюры
             self.tab_content.content = ft.Column(
-                [stats_row, ft.Divider(), controls_row, ft.Divider(), ft.ProgressRing()],
+                [controls_row, ft.Divider(), ft.ProgressRing()],
                 expand=True,
             )
             self.page.update()
             
             gallery = await self.create_gallery(selected_paths, "export")
             content = ft.Column(
-                [stats_row, ft.Divider(), controls_row, ft.Divider(), gallery],
+                [controls_row, ft.Divider(), gallery],
                 expand=True,
             )
         else:
             content = ft.Column(
-                [stats_row, ft.Divider(), controls_row,
+                [controls_row,
                  ft.Text(tr("export.none"), size=14, color=ft.Colors.ON_SURFACE_VARIANT)],
                 expand=True,
             )
@@ -1654,6 +1646,19 @@ class ImageDedupApp:
         if saved_selection:
             self.selected_images.update(saved_selection)
         
+        # Обновляем статистику выбранных в боковой панели
+        if hasattr(self, 'stat_selected'):
+            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
+            total_files = len(selected_paths)
+            total_size_bytes = 0
+            for path in selected_paths:
+                try:
+                    total_size_bytes += os.path.getsize(path)
+                except:
+                    pass
+            self.stat_selected.value = str(total_files)
+            self.stat_selected_size.value = _format_size(total_size_bytes)
+        
         # Для поиска и экспорта строим map path -> cluster_id (один раз)
         path_to_cluster = self._get_path_to_cluster_map() if scope in ("search_results", "export") else None
         
@@ -1911,8 +1916,8 @@ class ImageDedupApp:
             selected_in_view = len([p for p in self.current_gallery_paths if p in self.selected_images])
             self.selected_count_text.value = tr("selected.count", count=selected_in_view)
         
-        # Обновляем счётчик и размер в панели экспорта
-        if self.current_tab == 1 and hasattr(self, 'export_selected_count_text'):
+        # Обновляем статистику выбранных в боковой панели
+        if hasattr(self, 'stat_selected'):
             selected_paths = [p for p in self.selected_images if os.path.exists(p)]
             total_files = len(selected_paths)
             total_size_bytes = 0
@@ -1921,8 +1926,8 @@ class ImageDedupApp:
                     total_size_bytes += os.path.getsize(path)
                 except:
                     pass
-            self.export_selected_count_text.value = str(total_files)
-            self.export_total_size_text.value = _format_size(total_size_bytes)
+            self.stat_selected.value = str(total_files)
+            self.stat_selected_size.value = _format_size(total_size_bytes)
         
         # Обновляем иконку "Выбрать/Снять все"
         if self.current_gallery_scope == "overview" and hasattr(self, 'select_all_icon_button'):
@@ -1948,6 +1953,19 @@ class ImageDedupApp:
         self.update_clusters_list()
         
         self.show_snackbar(tr("selected.files", count=len(self.selected_images)), ft.Colors.BLUE)
+        
+        # Обновляем статистику выбранных в боковой панели
+        if hasattr(self, 'stat_selected'):
+            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
+            total_files = len(selected_paths)
+            total_size_bytes = 0
+            for path in selected_paths:
+                try:
+                    total_size_bytes += os.path.getsize(path)
+                except:
+                    pass
+            self.stat_selected.value = str(total_files)
+            self.stat_selected_size.value = _format_size(total_size_bytes)
         
         # Обновляем текущую вкладку
         if self.current_tab == -1:

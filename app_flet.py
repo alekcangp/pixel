@@ -235,8 +235,6 @@ class ImageDedupApp:
             self.stat_total_label.value = tr("stat.total")
             self.stat_dupes_label.value = tr("stat.dupes")
             self.stat_unique_label.value = tr("stat.unique")
-        if hasattr(self, "model_status"):
-            self.model_status.value = self._model_status_text()
 
         # Категории
         if hasattr(self, "categories_header"):
@@ -296,12 +294,6 @@ class ImageDedupApp:
                 color=ft.Colors.ON_SURFACE,
             )
 
-    def _model_status_text(self) -> str:
-        """Текст статуса модели на текущем языке."""
-        if getattr(self, "_model_status_error", None):
-            return tr("model.error", error=self._model_status_error)
-        return tr("model.loaded") if self.model_loaded else tr("model.loading")
-    
     def create_stats_section(self):
         """Секция статистики"""
         self.stat_total = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
@@ -310,12 +302,6 @@ class ImageDedupApp:
         self.stat_duplicates_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
         self.stat_unique = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
         self.stat_unique_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.model_status_ring = ft.ProgressRing(width=16, height=16, stroke_width=2)
-        self.model_status = ft.Text(self._model_status_text(), size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.model_status_row = ft.Row(
-            [self.model_status_ring, self.model_status],
-            spacing=6,
-        )
         
         self.stats_title_text = ft.Text(tr("stat.title"), size=18, weight=ft.FontWeight.BOLD)
         self.stat_total_label = ft.Text(tr("stat.total"), size=12)
@@ -345,7 +331,6 @@ class ImageDedupApp:
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_AROUND,
                 ),
-                self.model_status_row,
             ],
             spacing=10,
         )
@@ -579,30 +564,16 @@ class ImageDedupApp:
         """Фоновая загрузка модели.
 
         Загрузка/скачивание SigLIP выполняется в отдельном потоке
-        (asyncio.to_thread), чтобы не блокировать UI-поток Flet. Благодаря этому
-        во время загрузки модели окно уже отрисовано и отображает статистику
-        и превью (галерею), а индикатор в боковой панели показывает прогресс.
+        (asyncio.to_thread), чтобы не блокировать UI-поток Flet.
         """
         self.model_loading = True
-        self.model_status_ring.visible = True
-        self.model_status_ring.value = None  # неопределённый спиннер
-        self.model_status.value = tr("model.loading")
-        self.model_status.color = ft.Colors.ON_SURFACE_VARIANT
-        self.page.update()
         try:
             from core.embedder import get_embedder
-            # Тяжёлая инициализация модели уходит в фоновый поток.
             await asyncio.to_thread(get_embedder)
             self.model_loaded = True
             self._model_status_error = None
-            self.model_status_ring.visible = False
-            self.model_status.value = tr("model.loaded")
-            self.model_status.color = ft.Colors.GREEN
         except Exception as e:
-            self.model_status_ring.visible = False
             self._model_status_error = str(e)
-            self.model_status.value = tr("model.error", error=self._model_status_error)
-            self.model_status.color = ft.Colors.RED
         finally:
             self.model_loading = False
             self.page.update()

@@ -296,20 +296,20 @@ class ImageDedupApp:
 
     def create_stats_section(self):
         """Секция статистики"""
-        self.stat_total = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
-        self.stat_total_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.stat_duplicates = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.RED)
-        self.stat_duplicates_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.stat_unique = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
-        self.stat_unique_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.stat_selected = ft.Text("0", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
-        self.stat_selected_size = ft.Text("0 " + tr("unit.B"), size=10, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.stat_total = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
+        self.stat_total_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.stat_duplicates = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.RED)
+        self.stat_duplicates_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.stat_unique = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
+        self.stat_unique_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.stat_selected = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
+        self.stat_selected_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
         
         self.stats_title_text = ft.Text(tr("stat.title"), size=18, weight=ft.FontWeight.BOLD)
-        self.stat_total_label = ft.Text(tr("stat.total"), size=12)
-        self.stat_dupes_label = ft.Text(tr("stat.dupes"), size=12)
-        self.stat_unique_label = ft.Text(tr("stat.unique"), size=12)
-        self.stat_selected_label = ft.Text(tr("stat.selected"), size=12)
+        self.stat_total_label = ft.Text(tr("stat.total"), size=11)
+        self.stat_dupes_label = ft.Text(tr("stat.dupes"), size=11)
+        self.stat_unique_label = ft.Text(tr("stat.unique"), size=11)
+        self.stat_selected_label = ft.Text(tr("stat.selected"), size=11)
         
         return ft.Column(
             [

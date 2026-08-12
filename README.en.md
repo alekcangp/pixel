@@ -71,7 +71,7 @@ A Locality-Sensitive Hashing (LSH) index is then used to efficiently find hashes
 The current default threshold is:
 
 ```text
-pHash Hamming distance <= 3
+pHash Hamming distance <= 6
 ```
 
 Similar hashes are grouped using Union-Find.
@@ -398,7 +398,7 @@ If available GPU memory is insufficient, the embedding implementation can fall b
 ## Notes and limitations
 
 * pHash is designed for perceptual similarity and may group images that are not byte-identical.
-* The default pHash threshold is relatively strict (`3`) and can be adjusted in `config.py`.
+* The default pHash threshold is relatively strict (`6`) and can be adjusted in `config.py`.
 * System and service directories are excluded by default when scanning.
 * The desktop workflow automatically runs embeddings and clustering after scanning.
 * The standard `requirements.txt` installs PyTorch, even though several CLI operations are implemented so that they can work without importing PyTorch.

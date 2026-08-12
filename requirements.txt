@@ -1,11 +1,11 @@
 torch
 transformers>=4.38,<5.0
 pillow
+imagehash>=4.3
 scikit-learn
 faiss-cpu>=1.7.4
 numpy<2
 scipy<1.14
-opencv-python-headless
 flet==0.86.5
 umap-learn
 hdbscan

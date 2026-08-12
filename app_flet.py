@@ -1219,7 +1219,6 @@ class ImageDedupApp:
             session_key = "gallery_offset_search_results"
             setattr(self.page.session, session_key, 0)
             setattr(self.page.session, "gallery_scroll_search_results", 0)
-            setattr(self.page.session, "gallery_lazy_offset_search_results", 0)
             
             # Поиск в фоне. top_k = 1000 — берём максимум, затем фильтруем
             # по порогу близости в core/search.py (динамическое количество).
@@ -1505,7 +1504,6 @@ class ImageDedupApp:
         # может взять старый offset и срезать список в произвольной точке.
         session_key = f"gallery_offset_{scope}"
         setattr(self.page.session, session_key, 0)
-        setattr(self.page.session, f"gallery_lazy_offset_{scope}", 0)
         setattr(self.page.session, f"gallery_loading_{scope}", False)
 
         # Динамический page_size: заполняем видимую область окна целиком
@@ -1542,6 +1540,11 @@ class ImageDedupApp:
             gallery.controls.append(
                 self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path))
             )
+        
+        # Обновляем offset строго на количество реально загруженных путей.
+        # Если этого не сделать, offset останется 0, и первый же скролл
+        # в load_more заново подгрузит paths[0:page_size] → дубли путей в галерее.
+        setattr(self.page.session, session_key, len(page_paths))
         
         # Прогрев кэша миниатюр для следующих страниц галереи.
         # Важно: вставка всех элементов в GridView запрещена, иначе
@@ -1685,7 +1688,6 @@ class ImageDedupApp:
             loaded_count = len(page_paths)
             new_offset = offset + loaded_count
             setattr(self.page.session, f"gallery_offset_{scope}", new_offset)
-            setattr(self.page.session, f"gallery_lazy_offset_{scope}", new_offset)
             self.page.update()
         except Exception as ex:
             print(f"Load more error: {ex}")

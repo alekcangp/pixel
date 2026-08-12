@@ -1,8 +1,7 @@
-"""Дедупликация изображений по перцептивному хэшу (pHash).
+"""Дедупликация изображений по перцептивному хэшу (pHash, imagehash).
 
 Вся логика дедупликации собрана в одном файле:
-  - загрузка изображения (OpenCV);
-  - вычисление pHash (64-битный int);
+  - вычисление перцептивного хэша dHash (64-битный int);
   - LSH-индекс для быстрого поиска похожих хэшей;
   - Union-Find для кластеризации;
   - запуск дедупликации и печать статистики.
@@ -11,12 +10,10 @@
 import os
 import sys
 import shutil
-import threading
 import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -28,139 +25,37 @@ from core import scanner
 
 
 # ============================================================
-# Загрузка изображения
+# Перцептивный хэш (pHash, 64 бита)
 # ============================================================
 
-# OpenCV пишет предупреждения (например, про анимированные WebP/GIF) в stderr.
-# Подавление через os.dup2 на глобальном fd 2 НЕ потокобезопасно: при
-# параллельной дедупликации (ThreadPoolExecutor) несколько потоков могут
-# гоняться за fd 2, что приводит к повреждению stderr или падению процесса.
-# Поэтому переключение fd защищаем блокировкой. Чтобы не сериализовать
-# декодирование всех изображений, блокировку берём только для форматов,
-# которые реально генерируют предупреждения (анимированные WebP/GIF).
-_cv_stderr_lock = threading.Lock()
-
-# Расширения, при декодировании которых OpenCV может писать в stderr.
-_WARNING_EXTENSIONS = {".webp", ".gif"}
-
-
-def _needs_stderr_suppression(path):
-    """Возвращает True, если формат файла может генерировать предупреждения OpenCV."""
-    return os.path.splitext(path)[1].lower() in _WARNING_EXTENSIONS
-
-
-def _suppress_cv_stderr():
-    """Временно подавляет stderr OpenCV (сообщения об анимированных WebP/GIF).
-
-    Должен вызываться только при удержании _cv_stderr_lock.
-    """
-    devnull_fd = os.open(os.devnull, os.O_WRONLY)
-    orig_stderr_fd = os.dup(2)
-    os.dup2(devnull_fd, 2)
-    return orig_stderr_fd, devnull_fd
-
-
-def _restore_cv_stderr(orig_stderr_fd, devnull_fd):
-    """Восстанавливает stderr после _suppress_cv_stderr.
-
-    Должен вызываться только при удержании _cv_stderr_lock.
-    """
-    os.dup2(orig_stderr_fd, 2)
-    os.close(orig_stderr_fd)
-    os.close(devnull_fd)
-
-
-def load_image_cv(path):
-    """Загружает изображение через OpenCV (BGR). Возвращает None при ошибке.
-
-    Использует np.fromfile + cv2.imdecode вместо cv2.imread, чтобы корректно
-    обрабатывать пути с кириллицей/Unicode на Windows.
-    """
-    try:
-        data = np.fromfile(path, dtype=np.uint8)
-        if data.size == 0:
-            return None
-        if _needs_stderr_suppression(path):
-            # Форматы, которые могут писать в stderr: сериализуем декодирование
-            # через блокировку, чтобы не гоняться за глобальным fd 2.
-            with _cv_stderr_lock:
-                orig_fd, null_fd = _suppress_cv_stderr()
-                try:
-                    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-                finally:
-                    _restore_cv_stderr(orig_fd, null_fd)
-        else:
-            # Обычные форматы (JPEG/PNG и т.п.) не пишут в stderr —
-            # декодируем без блокировки, сохраняя параллелизм.
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        return img
-    except Exception:
-        return None
-
-
-# ============================================================
-# pHash
-# ============================================================
+# Используется один фиксированный хэш — imagehash.phash (классический DCT-pHash).
+# Он устойчив к масштабированию/перекодировке и не требует OpenCV (imagehash
+# работает на PIL+numpy). Раньше здесь был фолбек на самодельный FFT-хэш,
+# из-за которого «почти одинаковые» фото расходились по разным группам
+# дедупликации. dHash пробовали, но он слишком слабо различает плоские
+# изображения (маски CapCut и т.п.) и даёт гигантские цепочки-группы.
 
 def _bits_to_int(bits):
-    """Преобразует байты OpenCV img_hash в 64-битный int.
-
-    cv2.img_hash.PHash возвращает 8 байтов (64 бита). Распаковываем
-    каждый байт в 8 битов и собираем целое число.
-    """
+    """Преобразует массив битов 0/1 в 64-битный int."""
     arr = np.asarray(bits).ravel()
     if arr.size == 0:
         return 0
-
-    # Если вход уже выглядит как список битов 0/1 — собираем напрямую.
-    if np.all((arr == 0) | (arr == 1)):
-        h = 0
-        for bit in arr:
-            h = (h << 1) | int(bit > 0)
-        return int(h)
-
-    # Иначе трактуем значения как байты 0..255 и распаковываем их в биты.
-    bytes_arr = arr.astype(np.uint8)
-    packed_bits = np.unpackbits(bytes_arr, bitorder="big")
     h = 0
-    for bit in packed_bits[:64]:
-        h = (h << 1) | int(bit)
+    for bit in arr:
+        h = (h << 1) | int(bit > 0)
     return int(h)
 
 
-def _phash_pil(path):
-    """Fallback pHash через PIL + numpy (когда cv2.img_hash недоступен)."""
-    try:
-        img = Image.open(path).convert("L")
-        img = img.resize((32, 32), Image.Resampling.LANCZOS)
-        arr = np.array(img, dtype=np.float32)
-        dct = np.fft.fft2(arr)
-        dct = np.abs(dct[:8, :8])
-        dct[0, 0] = 0
-        median = np.median(dct)
-        bits = (dct > median).flatten()[:64]
-        h = 0
-        for bit in bits:
-            h = (h << 1) | int(bit)
-        return int(h)
-    except Exception:
-        return None
-
-
 def compute_phash(path):
-    """pHash (Perceptual Hash). Возвращает 64-битный int или None."""
-    img = load_image_cv(path)
-    if img is None:
-        return None
+    """pHash (DCT, imagehash.phash). Возвращает 64-битный int или None.
+
+    Возвращает None при повреждении/недоступности файла.
+    Имя и сигнатура сохранены для совместимости с core/search.py.
+    """
     try:
-        if hasattr(cv2, "img_hash"):
-            hasher = cv2.img_hash.PHash_create()
-            res = hasher.compute(img)
-            return _bits_to_int(res[0].flatten()[:64])
-    except Exception:
-        pass
-    try:
-        return _phash_pil(path)
+        import imagehash
+        img = Image.open(path)
+        return _bits_to_int(imagehash.phash(img).hash)
     except Exception:
         return None
 

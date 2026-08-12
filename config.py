@@ -82,9 +82,13 @@ DEFAULT_EXCLUDE_DIRS = [
     ".vscode",
 ]
 
-# Perceptual deduplication
+# Perceptual deduplication (imagehash.phash, 64-bit)
 # Maximum Hamming distance between pHash values considered similar.
-PHASH_THRESHOLD = 3
+# imagehash docs: <10 "similar", <5 "very similar". We use 6 for dedup:
+# real near-duplicates land in 0-4 bits, and a larger threshold makes
+# the transitive Union-Find chains collapse unrelated flat images
+# (e.g. CapCut masks) into one giant group.
+PHASH_THRESHOLD = 6
 
 # Image embeddings
 SIGLIP_MODEL = "google/siglip-base-patch16-224"

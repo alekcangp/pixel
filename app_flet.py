@@ -1358,6 +1358,31 @@ class ImageDedupApp:
             on_secondary_tap=on_secondary_tap,
         )
 
+    def _make_loading_indicator(self) -> ft.Container:
+        """Индикатор загрузки в конце галереи (пока подгружаются следующие фото).
+
+        Отображается как ячейка сетки с ProgressRing по центру. Помечаем
+        через data, чтобы отличать от обычных изображений и правильно
+        управлять им при lazy loading.
+        """
+        return ft.Container(
+            content=ft.ProgressRing(width=40, height=40, stroke_width=4),
+            width=150,
+            height=150,
+            alignment=ft.Alignment.CENTER,
+            border_radius=8,
+            data="_loading_indicator",
+        )
+
+    def _find_loading_indicator(self, gallery: ft.GridView):
+        """Возвращает индекс ячейки-индикатора загрузки в controls, либо None."""
+        if gallery is None:
+            return None
+        for i, control in enumerate(gallery.controls):
+            if isinstance(control, ft.Container) and control.data == "_loading_indicator":
+                return i
+        return None
+
     def _calc_grid_columns(self) -> int:
         """Вычисляет количество столбцов сетки (runs_count) под ширину окна."""
         window_w = getattr(self.page, 'width', 1200) or 1200
@@ -1545,7 +1570,12 @@ class ImageDedupApp:
         # Если этого не сделать, offset останется 0, и первый же скролл
         # в load_more заново подгрузит paths[0:page_size] → дубли путей в галерее.
         setattr(self.page.session, session_key, len(page_paths))
-        
+
+        # Показываем индикатор загрузки в конце галереи, если остались
+        # ещё не загруженные фото. Он будет заменён/передвинут при подгрузке.
+        if offset + len(page_paths) < len(paths):
+            gallery.controls.append(self._make_loading_indicator())
+
         # Прогрев кэша миниатюр для следующих страниц галереи.
         # Важно: вставка всех элементов в GridView запрещена, иначе
         # lazy loading перестаёт быть lazy loading и UI утяжеляется.
@@ -1593,8 +1623,11 @@ class ImageDedupApp:
 
                 paths_len = int(len(paths)) if paths is not None else 0
 
-                # Все элементы уже загружены
-                if offset_int + dynamic_page_size >= paths_len:
+                # Все элементы уже загружены.
+                # Важно: НЕ сравниваем offset + page_size, иначе последняя
+                # неполная порция (меньше одной страницы) никогда не подгрузится:
+                # спиннер в конце галереи останется крутиться вечно.
+                if offset_int >= paths_len:
                     return
 
                 # Защита от повторной загрузки: при наличии уже запущенной
@@ -1669,15 +1702,25 @@ class ImageDedupApp:
             # Генерируем миниатюры параллельно в фоновом режиме (12 потоков)
             thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=12)
 
+            # Находим индикатор загрузки (он всегда в конце галереи).
+            # Новые элементы вставляем ПЕРЕД ним, чтобы индикатор оставался
+            # внизу, пока есть ещё не догруженные фото.
+            indicator_idx = self._find_loading_indicator(gallery)
+            if indicator_idx is None:
+                indicator_idx = len(gallery.controls)
+
             # Делаем вставку пачками, чтобы UI-поток не получил "удар" большим
             # количеством новых контролов за один тик. Это критично для Flet.
             lazy_batch_size = max(1, min(12, len(page_paths)))
             for block_start in range(0, len(page_paths), lazy_batch_size):
                 block = page_paths[block_start:block_start + lazy_batch_size]
+                insert_at = indicator_idx
                 for path in block:
-                    gallery.controls.append(
-                        self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path))
+                    gallery.controls.insert(
+                        insert_at,
+                        self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path)),
                     )
+                    insert_at += 1
 
                 # Небольшой yield нужен, чтобы страницу успевали перерисовать
                 # между блоками; мы не держим поток заблокированным длительное время.
@@ -1688,6 +1731,15 @@ class ImageDedupApp:
             loaded_count = len(page_paths)
             new_offset = offset + loaded_count
             setattr(self.page.session, f"gallery_offset_{scope}", new_offset)
+
+            # Если загружены уже все фото — убираем индикатор загрузки из конца.
+            # Иначе оставляем его на месте: следующая порция будет подгружена
+            # при очередном скролле.
+            if new_offset >= len(paths):
+                idx = self._find_loading_indicator(gallery)
+                if idx is not None:
+                    gallery.controls.pop(idx)
+
             self.page.update()
         except Exception as ex:
             print(f"Load more error: {ex}")

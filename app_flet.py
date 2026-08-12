@@ -1068,16 +1068,16 @@ class ImageDedupApp:
         size_str = _format_size(total_size_bytes)
         
         # Статистика выбранных файлов
+        self.export_selected_count_text = ft.Text(str(total_files), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
+        self.export_total_size_text = ft.Text(size_str, size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
         stats_row = ft.Row(
             [
                 ft.Column(
-                    [ft.Text(str(total_files), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                     ft.Text(tr("export.selected_files"), size=12)],
+                    [self.export_selected_count_text, ft.Text(tr("export.selected_files"), size=12)],
                     alignment=ft.MainAxisAlignment.CENTER,
                 ),
                 ft.Column(
-                    [ft.Text(size_str, size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                     ft.Text(tr("export.total_size"), size=12)],
+                    [self.export_total_size_text, ft.Text(tr("export.total_size"), size=12)],
                     alignment=ft.MainAxisAlignment.CENTER,
                 ),
             ],
@@ -1910,6 +1910,19 @@ class ImageDedupApp:
         if hasattr(self, 'selected_count_text'):
             selected_in_view = len([p for p in self.current_gallery_paths if p in self.selected_images])
             self.selected_count_text.value = tr("selected.count", count=selected_in_view)
+        
+        # Обновляем счётчик и размер в панели экспорта
+        if self.current_tab == 1 and hasattr(self, 'export_selected_count_text'):
+            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
+            total_files = len(selected_paths)
+            total_size_bytes = 0
+            for path in selected_paths:
+                try:
+                    total_size_bytes += os.path.getsize(path)
+                except:
+                    pass
+            self.export_selected_count_text.value = str(total_files)
+            self.export_total_size_text.value = _format_size(total_size_bytes)
         
         # Обновляем иконку "Выбрать/Снять все"
         if self.current_gallery_scope == "overview" and hasattr(self, 'select_all_icon_button'):

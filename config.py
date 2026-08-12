@@ -7,6 +7,9 @@ STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 # SQLite database
 DB_FILE = os.path.join(STORAGE_DIR, "images.db")
 
+# UI language: "ru", "en", or "auto". Default is auto-detect from OS locale.
+APP_LANGUAGE = "auto"
+
 # Scanning
 DEFAULT_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"]
 

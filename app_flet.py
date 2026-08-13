@@ -158,14 +158,26 @@ class ImageDedupApp:
         )
         
         # Sidebar
-        self.sidebar = ft.Container(
+        self.sidebar_stats = ft.Container(
+            content=self.create_stats_section(),
+        )
+        self.sidebar_clusters = ft.Container(
             content=ft.Column(
                 [
-                    self.create_stats_section(),
-                    ft.Divider(),
                     self.create_clusters_section(),
                 ],
                 scroll=ft.ScrollMode.AUTO,
+            ),
+            expand=True,
+        )
+        self.sidebar = ft.Container(
+            content=ft.Column(
+                [
+                    self.sidebar_stats,
+                    ft.Divider(),
+                    self.sidebar_clusters,
+                ],
+                expand=True,
             ),
             width=280,
             bgcolor=ft.Colors.SURFACE_CONTAINER,
@@ -189,7 +201,6 @@ class ImageDedupApp:
             ft.Column(
                 [
                     header_row,
-                    ft.Divider(height=1),
                     ft.Row(
                         [self.sidebar, self.main_content],
                         expand=True,
@@ -1362,8 +1373,6 @@ class ImageDedupApp:
                 gallery = await self.create_gallery(paths, "search_results")
                 
                 self.search_results_container.controls = [
-                    ft.Text(tr("search.results", count=len(results)), size=14),
-                    ft.Divider(),
                     gallery,
                 ]
             else:

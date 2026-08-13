@@ -380,11 +380,18 @@ class ImageDedupApp:
             self.categories_header.value = tr("categories.title", count=0)
             return
         
-        # Обновляем заголовок с количеством категорий
         self.categories_header.value = tr("categories.title", count=len(self.clusters))
         
-        # Создаём 3 столбца с кнопками
+        self._cluster_display_map = {
+            cid: i + 1 for i, (cid, _) in enumerate(sorted(self.clusters.items()))
+        }
+        
         clusters_list = sorted(self.clusters.items())
+        columns = [[] for _ in range(3)]
+        
+        for i, (cluster_id, members) in enumerate(clusters_list):
+            col_idx = i % 3
+            columns[col_idx].append((cluster_id, members))
         columns = [[] for _ in range(3)]
         
         for i, (cluster_id, members) in enumerate(clusters_list):
@@ -411,7 +418,7 @@ class ImageDedupApp:
                         bgcolor = ft.Colors.SURFACE_CONTAINER_HIGHEST
                         color = ft.Colors.ON_SURFACE
                     button = ft.ElevatedButton(
-                        f"{cluster_id + 2} ({len(members)})",
+                        f"{self._cluster_display_map[cluster_id]} ({len(members)})",
                         data=cluster_id,
                         width=70,
                         height=50,
@@ -1445,9 +1452,10 @@ class ImageDedupApp:
         if scope in ("search_results", "export") and path_to_cluster:
             cluster_id = path_to_cluster.get(path)
             if cluster_id is not None:
+                display_num = getattr(self, '_cluster_display_map', {}).get(cluster_id, cluster_id)
                 badge = ft.Container(
                     content=ft.Text(
-                        str(int(cluster_id) + 2),
+                        str(display_num),
                         size=10,
                         weight=ft.FontWeight.NORMAL,
                         color=ft.Colors.with_opacity(0.7, ft.Colors.ON_SURFACE_VARIANT),

@@ -119,7 +119,7 @@ STRINGS = {
         "scan.all_disks": "All disks",
         "scan.button.scan": "Scan",
         "scan.button.start": "Start scan",
-        "scan.button.stop": "Stop",
+        "scan.button.stop": "Stop scan",
         "scan.button.reset": "Reset",
         "scan.no_files": "No files found",
         "scan.no_disks": "No available disks found",

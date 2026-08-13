@@ -344,8 +344,8 @@ class ImageDedupApp:
         if hasattr(self, "browse_export_button"):
             self.browse_export_button.tooltip = tr("pick.export")
         if hasattr(self, "mode_scan_btn"):
-            self.mode_scan_btn.content = tr("scan.button.stop") if self.scanning else tr("scan.button.scan")
-            self.mode_scan_btn.tooltip = tr("scan.button.stop") if self.scanning else tr("scan.button.scan")
+            self.mode_scan_btn.content = tr("scan.button.scan")
+            self.mode_scan_btn.tooltip = tr("scan.button.scan")
         if hasattr(self, "reset_button"):
             self.reset_button.content = tr("scan.button.reset")
             self.reset_button.tooltip = tr("scan.button.reset")
@@ -641,7 +641,6 @@ class ImageDedupApp:
             height=48,
             bgcolor=ft.Colors.PRIMARY,
             color=ft.Colors.ON_PRIMARY,
-            tooltip=tr("scan.button.start"),
             on_click=lambda e: asyncio.create_task(self.toggle_scan(e)),
         )
         self.scan_context_row = ft.Row(
@@ -1070,10 +1069,7 @@ class ImageDedupApp:
         finally:
             print("Процесс завершён.")
             self.scanning = False
-            self.mode_scan_btn.content = tr("scan.button.scan")
-            self.mode_scan_btn.icon = ft.Icons.SEARCH
-            self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
-            self.start_scan_btn.text = tr("scan.button.start")
+            self.start_scan_btn.content = tr("scan.button.start")
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
             self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
             self._reset_window_progress()
@@ -1083,10 +1079,7 @@ class ImageDedupApp:
         if self.scanning:
             # Останавливаем сканирование
             await self._cancel_scan_workers()
-            self.mode_scan_btn.content = tr("scan.button.scan")
-            self.mode_scan_btn.icon = ft.Icons.SEARCH
-            self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
-            self.start_scan_btn.text = tr("scan.button.start")
+            self.start_scan_btn.content = tr("scan.button.start")
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
             self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
             self._reset_window_progress()
@@ -1112,12 +1105,10 @@ class ImageDedupApp:
         
         self.scanning = True
         scanner.STOP_REQUESTED = False
-        self.mode_scan_btn.content = tr("scan.button.stop")
-        self.mode_scan_btn.icon = ft.Icons.STOP
-        self.mode_scan_btn.bgcolor = ft.Colors.ERROR
-        self.start_scan_btn.text = tr("scan.button.stop")
+        self.start_scan_btn.content = tr("scan.button.stop")
         self.start_scan_btn.icon = ft.Icons.STOP
         self.start_scan_btn.bgcolor = ft.Colors.ERROR
+        self.page.update()
         
         # Показываем прогресс в заголовке окна
         self._set_window_progress(tr("stage.scan"))
@@ -1194,9 +1185,9 @@ class ImageDedupApp:
         """Полный сброс базы данных, кэша и состояния приложения"""
         if self.scanning:
             await self._cancel_scan_workers()
-            self.mode_scan_btn.content = tr("scan.button.scan")
-            self.mode_scan_btn.icon = ft.Icons.SEARCH
-            self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self.start_scan_btn.content = tr("scan.button.start")
+            self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
+            self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
         self._reset_window_progress()
         
         database.clear_all()

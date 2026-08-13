@@ -1296,7 +1296,6 @@ class ImageDedupApp:
         )
         self.page.update()
         
-        # Галерея (генерация миниатюр в фоновом потоке)
         gallery = await self.create_gallery(members, f"cluster_{cluster_id}")
         
         self.tab_content.content = ft.Column(

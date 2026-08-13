@@ -72,9 +72,6 @@ class ImageDedupApp:
         self.clusters = {}
         self.cluster_names = {}
         self.search_results = []
-        self.progress_visible = False
-        self.progress_value = 0.0
-        self.progress_label = ""
         self.model_loaded = False
         self.model_loading = False
         self.scanning = False
@@ -84,6 +81,15 @@ class ImageDedupApp:
         self.export_task = None
         self._export_stop_requested = False
         self._current_lang = LANG
+
+        # Текущий режим: scan / search / export / cluster
+        self.current_mode = "scan"
+
+        # Последний прогресс для заголовка окна (нужен при смене языка)
+        self._win_progress_stage = None
+        self._win_progress_current = 0
+        self._win_progress_total = 0
+
         
         # Состояние выбора изображений
         self.selected_images = set()
@@ -160,6 +166,7 @@ class ImageDedupApp:
         # Sidebar
         self.sidebar_stats = ft.Container(
             content=self.create_stats_section(),
+            height=120,
         )
         self.sidebar_clusters = ft.Container(
             content=ft.Column(
@@ -170,30 +177,82 @@ class ImageDedupApp:
             ),
             expand=True,
         )
+        sidebar_content = ft.Column(
+            [
+                self.sidebar_stats,
+                ft.Divider(),
+                self.sidebar_clusters,
+            ],
+            expand=True,
+        )
         self.sidebar = ft.Container(
-            content=ft.Column(
+            content=ft.Stack(
                 [
-                    self.sidebar_stats,
-                    ft.Divider(),
-                    self.sidebar_clusters,
+                    ft.Container(
+                        expand=True,
+                        image=ft.DecorationImage(
+                            src=self._wallpaper_path("wallpaper_left.png"),
+                            fit=ft.BoxFit.COVER,
+                            repeat=ft.ImageRepeat.REPEAT_Y,
+                        ),
+                    ),
+                    ft.Container(
+                        content=sidebar_content,
+                        bgcolor=ft.Colors.with_opacity(0.88, ft.Colors.SURFACE_CONTAINER),
+                        padding=15,
+                        expand=True,
+                    ),
                 ],
                 expand=True,
             ),
             width=280,
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-            padding=15,
             border_radius=10,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
         
-        # Основная область
-        self.main_content = ft.Column(
+        # Основная область (с обойным фоном)
+        self.tab_content = ft.Container(
+            content=ft.Row(
+                [ft.ProgressRing(width=32, height=32), ft.Text(tr("loading"), size=14)],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=10,
+            ),
+            expand=True,
+        )
+        self.current_tab = -1
+        main_content_column = ft.Column(
             [
-                self.create_scan_section(),
-                self.create_progress_section(),
-                self.create_tabs(),
+                self.create_controls_panel(),
+                ft.Divider(),
+                self.tab_content,
             ],
             expand=True,
             spacing=10,
+        )
+        self.main_content = ft.Container(
+            content=ft.Stack(
+                [
+                    ft.Container(
+                        expand=True,
+                        image=ft.DecorationImage(
+                            src=self._wallpaper_path("wallpaper_right.png"),
+                            fit=ft.BoxFit.COVER,
+                            repeat=ft.ImageRepeat.REPEAT_X,
+                        ),
+                    ),
+                    ft.Container(
+                        content=main_content_column,
+                        bgcolor=ft.Colors.with_opacity(0.88, ft.Colors.SURFACE_CONTAINER),
+                        padding=15,
+                        border_radius=10,
+                        expand=True,
+                    ),
+                ],
+                expand=True,
+            ),
+            expand=True,
+            border_radius=10,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
         
         # Добавляем на страницу
@@ -212,6 +271,29 @@ class ImageDedupApp:
             )
         )
     
+    def _wallpaper_path(self, filename: str) -> str:
+        """Возвращает абсолютный путь к обоям в assets/."""
+        return os.path.join(config.BASE_DIR, "assets", filename)
+
+    def _set_window_progress(self, label: str, current: int = 0, total: int = 0):
+        """Показывает стадию и счётчик в заголовке окна, напр. 'Сканирование... 3/100'."""
+        self._win_progress_stage = label
+        self._win_progress_current = current
+        self._win_progress_total = total
+        if total and total > 0:
+            self.page.title = f"{label}... {current}/{total}"
+        else:
+            self.page.title = f"{label}..."
+        self.page.update()
+
+    def _reset_window_progress(self):
+        """Возвращает стандартный заголовок окна."""
+        self._win_progress_stage = None
+        self._win_progress_current = 0
+        self._win_progress_total = 0
+        self.page.title = tr("app.title")
+        self.page.update()
+
     def _switch_language(self, lang: str):
         """Переключает язык приложения."""
         set_language(lang)
@@ -261,36 +343,46 @@ class ImageDedupApp:
             self.browse_scan_path_button.tooltip = tr("scan.browse")
         if hasattr(self, "browse_export_button"):
             self.browse_export_button.tooltip = tr("pick.export")
-        if hasattr(self, "scan_button"):
-            self.scan_button.text = tr("scan.button.stop") if self.scanning else tr("scan.button.scan")
-            self.scan_button.tooltip = tr("scan.button.stop") if self.scanning else tr("scan.button.scan")
+        if hasattr(self, "mode_scan_btn"):
+            self.mode_scan_btn.content = tr("scan.button.stop") if self.scanning else tr("scan.button.scan")
+            self.mode_scan_btn.tooltip = tr("scan.button.stop") if self.scanning else tr("scan.button.scan")
         if hasattr(self, "reset_button"):
-            self.reset_button.text = tr("scan.button.reset")
+            self.reset_button.content = tr("scan.button.reset")
             self.reset_button.tooltip = tr("scan.button.reset")
 
-        # Вкладки
-        if hasattr(self, "tab_search_btn"):
-            self.tab_search_btn.text = tr("tab.search")
-            self.tab_export_btn.text = tr("tab.export")
+        # Кнопки режимов
+        if hasattr(self, "mode_search_btn"):
+            self.mode_search_btn.content = tr("tab.search")
+        if hasattr(self, "mode_export_btn"):
+            self.mode_export_btn.content = tr("tab.export")
 
         # Поиск
         if hasattr(self, "search_input"):
             self.search_input.label = tr("search.label")
             self.search_input.hint_text = tr("search.hint")
-            self.search_button.text = tr("search.button")
+            self.search_button.content = tr("search.button")
             self.search_button.tooltip = tr("search.button")
 
         # Экспорт
         if hasattr(self, "export_button"):
             if self.exporting:
-                self.export_button.text = tr("export.button.stop")
+                self.export_button.content = tr("export.button.stop")
                 self.export_button.tooltip = tr("export.button.stop")
             else:
-                self.export_button.text = tr("export.button")
+                self.export_button.content = tr("export.button")
                 self.export_button.tooltip = tr("export.button")
         if hasattr(self, "export_dest_folder"):
             self.export_dest_folder.label = tr("export.folder")
             self.export_dest_folder.hint_text = tr("export.default_folder")
+
+        # Заголовок окна: перерисовываем стадию прогресса или возвращаем стандарт
+        if self._win_progress_stage is not None:
+            if self._win_progress_total and self._win_progress_total > 0:
+                self.page.title = f"{self._win_progress_stage}... {self._win_progress_current}/{self._win_progress_total}"
+            else:
+                self.page.title = f"{self._win_progress_stage}..."
+        else:
+            self.page.title = tr("app.title")
 
     def _update_lang_button_styles(self, btn: ft.TextButton, is_active: bool):
         """Обновляет стили кнопки языка."""
@@ -444,6 +536,9 @@ class ImageDedupApp:
         self._save_current_gallery_scroll()
         self.active_cluster_id = cluster_id
         self.current_tab = -1
+        self.current_mode = "cluster"
+        self._update_mode_buttons()
+        self._update_context_row()
         asyncio.create_task(self.show_clusters_tab())
         # Обновляем подсветку кнопок
         self.update_clusters_list()
@@ -482,32 +577,27 @@ class ImageDedupApp:
         if self._preview_dialog is not None and self._preview_dialog.open:
             self._update_preview_size()
     
-    def create_scan_section(self):
-        """Секция сканирования"""
-        self.scan_path_input = ft.TextField(
-            label=tr("scan.path.label"),
-            value=tr("scan.all_disks"),
-            expand=True,
-            border_radius=8,
-            hint_text=tr("scan.path.hint"),
-        )
-        
-        # Кнопка выбора пути через проводник
-        self.browse_scan_path_button = ft.IconButton(
-            icon=ft.Icons.FOLDER_OPEN,
-            tooltip=tr("scan.browse"),
-            on_click=self.browse_scan_path,
-        )
-        
-        self.scan_button = ft.ElevatedButton(
+    def create_controls_panel(self):
+        """Верхняя панель управления: Row 1 (режимы) + Row 2 (контекстные контролы)."""
+        # --- Row 1: кнопки режимов и сброс ---
+        self.mode_scan_btn = ft.ElevatedButton(
             tr("scan.button.scan"),
             icon=ft.Icons.SEARCH,
             bgcolor=ft.Colors.PRIMARY,
             color=ft.Colors.ON_PRIMARY,
             tooltip=tr("scan.button.scan"),
-            on_click=self.toggle_scan,
+            on_click=lambda e: self.switch_mode("scan"),
         )
-        
+        self.mode_search_btn = ft.ElevatedButton(
+            tr("tab.search"),
+            icon=ft.Icons.SEARCH,
+            on_click=lambda e: self.switch_mode("search"),
+        )
+        self.mode_export_btn = ft.ElevatedButton(
+            tr("tab.export"),
+            icon=ft.Icons.FOLDER_OPEN,
+            on_click=lambda e: self.switch_mode("export"),
+        )
         self.reset_button = ft.ElevatedButton(
             tr("scan.button.reset"),
             icon=ft.Icons.DELETE_FOREVER,
@@ -516,76 +606,182 @@ class ImageDedupApp:
             tooltip=tr("scan.button.reset"),
             on_click=self._show_reset_dialog,
         )
-        
-        return ft.Column(
+        row1 = ft.Row(
             [
-                ft.Row(
-                    [self.scan_path_input, self.browse_scan_path_button, self.scan_button, self.reset_button],
-                    spacing=10,
-                ),
+                self.mode_scan_btn,
+                self.mode_search_btn,
+                self.mode_export_btn,
+                ft.Container(expand=True),
+                self.reset_button,
             ],
-            spacing=5,
-        )
-    
-    def create_progress_section(self):
-        """Секция прогресса"""
-        self.progress_bar = ft.ProgressBar(
-            visible=False,
-            value=0,
-            bgcolor=ft.Colors.SURFACE_CONTAINER,
-        )
-        self.progress_text = ft.Text(
-            "",
-            size=14,
-            color=ft.Colors.ON_SURFACE_VARIANT,
-            visible=False,
-        )
-        
-        self.progress_container = ft.Column(
-            [self.progress_bar, self.progress_text],
-            visible=False,
-            spacing=5,
-        )
-        
-        return self.progress_container
-    
-    def create_tabs(self):
-        """Вкладки"""
-        # Кнопки вкладок
-        self.tab_search_btn = ft.ElevatedButton(
-            tr("tab.search"),
-            icon=ft.Icons.SEARCH,
-            on_click=lambda e: self.switch_tab(0),
-        )
-        self.tab_export_btn = ft.ElevatedButton(
-            tr("tab.export"),
-            icon=ft.Icons.FOLDER_OPEN,
-            on_click=lambda e: self.switch_tab(1),
-        )
-        self.tab_buttons = ft.Row(
-            [self.tab_search_btn, self.tab_export_btn],
-            spacing=5,
-        )
-        
-        # Контент вкладок
-        self.tab_content = ft.Container(
-            content=ft.Row(
-                [ft.ProgressRing(), ft.Text(tr("loading"), size=14)],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=10,
-            ),
-            expand=True,
-        )
-        
-        # Текущая вкладка (-1 = кластерный режим)
-        self.current_tab = -1
-        
-        return ft.Column(
-            [self.tab_buttons, self.tab_content],
-            expand=True,
             spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+            alignment=ft.MainAxisAlignment.START,
+        )
+
+        # --- Row 2: контекстные контролы текущего режима ---
+        # Сканирование
+        self.scan_path_input = ft.TextField(
+            label=tr("scan.path.label"),
+            value=tr("scan.all_disks"),
+            expand=True,
+            height=48,
+            border_radius=8,
+            hint_text=tr("scan.path.hint"),
+        )
+        self.browse_scan_path_button = ft.IconButton(
+            icon=ft.Icons.FOLDER_OPEN,
+            height=48,
+            tooltip=tr("scan.browse"),
+            on_click=self.browse_scan_path,
+        )
+        self.start_scan_btn = ft.ElevatedButton(
+            tr("scan.button.start"),
+            icon=ft.Icons.PLAY_ARROW,
+            height=48,
+            bgcolor=ft.Colors.PRIMARY,
+            color=ft.Colors.ON_PRIMARY,
+            tooltip=tr("scan.button.start"),
+            on_click=lambda e: asyncio.create_task(self.toggle_scan(e)),
+        )
+        self.scan_context_row = ft.Row(
+            [self.scan_path_input, self.browse_scan_path_button, self.start_scan_btn],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.END,
+        )
+
+        # Поиск
+        self.search_input = ft.TextField(
+            label=tr("search.label"),
+            hint_text=tr("search.hint"),
+            expand=True,
+            height=48,
+            on_submit=self.do_search,
+        )
+        self.search_button = ft.ElevatedButton(
+            tr("search.button"),
+            icon=ft.Icons.SEARCH,
+            height=48,
+            bgcolor=ft.Colors.PRIMARY,
+            color=ft.Colors.ON_PRIMARY,
+            tooltip=tr("search.button"),
+            on_click=self.do_search,
+        )
+        self.search_results_container = ft.Column(expand=True)
+        self.search_context_row = ft.Row(
+            [self.search_input, self.search_button],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.END,
+        )
+
+        # Экспорт
+        default_path = getattr(self, "_export_dest_folder_path", None) or \
+            getattr(self.page.session, "export_dest_folder", None) or tr("export.default_folder")
+        self.export_dest_folder = ft.TextField(
+            label=tr("export.folder"),
+            value=default_path,
+            expand=True,
+            height=48,
+            on_change=self._on_export_path_changed,
+        )
+        self.browse_export_button = ft.IconButton(
+            icon=ft.Icons.FOLDER_OPEN,
+            height=48,
+            tooltip=tr("pick.export"),
+            on_click=lambda e: self.browse_destination_folder(self.export_dest_folder),
+        )
+        self.export_button = ft.ElevatedButton(
+            tr("export.button"),
+            icon=ft.Icons.DOWNLOAD,
+            height=48,
+            bgcolor=ft.Colors.PRIMARY,
+            color=ft.Colors.ON_PRIMARY,
+            tooltip=tr("export.button"),
+            on_click=self.toggle_export,
+        )
+        self.export_context_row = ft.Row(
+            [self.export_dest_folder, self.browse_export_button, self.export_button],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        # Категории (из боковой панели)
+        self.cluster_select_all_icon_button = ft.IconButton(
+            icon=ft.Icons.CHECK_BOX_OUTLINE_BLANK,
+            tooltip=tr("select_all.toggle"),
+        )
+        self.selected_count_text = ft.Text(tr("selected.count", count=0), size=14)
+        self.cluster_context_row = ft.Row(
+            [self.cluster_select_all_icon_button, self.selected_count_text],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        self.context_container = ft.Container(
+            content=self.scan_context_row,
+        )
+
+        return ft.Column(
+            [row1, ft.Container(expand=True), self.context_container],
+            spacing=12,
+            height=120,
+            alignment=ft.MainAxisAlignment.START,
         )
     
+    def _update_mode_buttons(self):
+        """Подсветка активной кнопки режима."""
+        self.mode_search_btn.style = (
+            ft.ButtonStyle(bgcolor=ft.Colors.PRIMARY, color=ft.Colors.ON_PRIMARY)
+            if self.current_mode == "search" else None
+        )
+        self.mode_export_btn.style = (
+            ft.ButtonStyle(bgcolor=ft.Colors.PRIMARY, color=ft.Colors.ON_PRIMARY)
+            if self.current_mode == "export" else None
+        )
+        # Кнопка сканирования: PRIMARY в режиме scan, де-эмфаза в остальных
+        # (во время сканирования её состояние управляется toggle_scan — красная Stop).
+        if self.current_mode == "scan":
+            if not self.scanning:
+                self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
+                self.mode_scan_btn.color = ft.Colors.ON_PRIMARY
+        else:
+            if not self.scanning:
+                self.mode_scan_btn.bgcolor = None
+                self.mode_scan_btn.color = None
+
+    def _update_context_row(self):
+        """Показывает контекстные контролы текущего режима."""
+        if self.current_mode == "search":
+            self.context_container.content = self.search_context_row
+        elif self.current_mode == "export":
+            self.context_container.content = self.export_context_row
+        elif self.current_mode == "cluster":
+            self.context_container.content = self.cluster_context_row
+        else:
+            self.context_container.content = self.scan_context_row
+
+    def switch_mode(self, mode: str):
+        """Переключение режима: scan / search / export / cluster."""
+        self._save_current_gallery_scroll()
+        self.current_mode = mode
+        self._update_mode_buttons()
+        self._update_context_row()
+        self.page.update()
+
+        if mode == "scan":
+            # Только переключаемся на режим сканирования.
+            # Запуск сканирования выполняется кнопкой "Start scan" (start_scan_btn).
+            pass
+        elif mode == "search":
+            self.current_tab = 0
+            self.show_search_tab()
+        elif mode == "export":
+            self.current_tab = 1
+            asyncio.create_task(self.show_export_tab())
+        elif mode == "cluster":
+            self.current_tab = -1
+            asyncio.create_task(self.show_clusters_tab())
+
     async def preload_model(self):
         """Фоновая загрузка модели.
 
@@ -694,7 +890,11 @@ class ImageDedupApp:
             pass
 
     def _progress_callback(self, stage: str, current: int, total: int, message: str):
-        """Callback для обновления прогресс-бара из фоновых потоков.
+        """Callback для обновления прогресса из фоновых потоков.
+
+        Прогресс показывается в заголовке окна как 'Стадия... счётчик/всего'
+        (например 'Сканирование... 3/100'). Длинное сообщение (message) в UI
+        больше не выводится — только стадия и счётчик.
 
         page.update() в Flet НЕ потокобезопасен — на Windows вызов из чужого потока
         даёт WinError 1. Используем page.run_task() для переноса обновления
@@ -716,14 +916,7 @@ class ImageDedupApp:
             async def update_ui():
                 if not self.scanning:
                     return
-                if total and total > 0:
-                    progress = min(current / total, 1.0)
-                    self.progress_bar.value = progress
-                    self.progress_text.value = f"{label}: {current}/{total} ({int(progress * 100)}%) · {message}"
-                else:
-                    self.progress_text.value = f"{label}: {message}"
-
-                self.page.update()
+                self._set_window_progress(label, current, total)
 
             self.page.run_task(update_ui)
         except Exception as ex:
@@ -787,8 +980,7 @@ class ImageDedupApp:
             for i, path in enumerate(scan_paths):
                 if scanner.STOP_REQUESTED:
                     break
-                self.progress_text.value = tr("progress.scan", cur=i + 1, total=len(scan_paths), path=path)
-                self.page.update()
+                self._set_window_progress(tr("stage.scan"), i + 1, len(scan_paths))
                 
                 task = asyncio.create_task(asyncio.to_thread(
                     scanner.run,
@@ -814,9 +1006,7 @@ class ImageDedupApp:
                 return
             
             # 2. Дедупликация
-            self.progress_text.value = tr("progress.dedup")
-            self.progress_bar.value = 0
-            self.page.update()
+            self._set_window_progress(tr("stage.dedup"))
             
             task = asyncio.create_task(asyncio.to_thread(dedup.run, incremental=True, progress_callback=self._progress_callback))
             self._scan_worker_tasks.append(task)
@@ -833,9 +1023,7 @@ class ImageDedupApp:
             self.load_stats()
 
             # 3. Эмбеддинги
-            self.progress_text.value = tr("progress.embed")
-            self.progress_bar.value = 0
-            self.page.update()
+            self._set_window_progress(tr("stage.embed"))
             
             task = asyncio.create_task(asyncio.to_thread(embedder.run, incremental=True, progress_callback=self._progress_callback))
             self._scan_worker_tasks.append(task)
@@ -854,9 +1042,7 @@ class ImageDedupApp:
             
             # 4. Кластеризация (только если включено в конфиге)
             if config.AUTO_CLUSTER_AFTER_SCAN:
-                self.progress_text.value = tr("progress.cluster")
-                self.progress_bar.value = 0
-                self.page.update()
+                self._set_window_progress(tr("stage.cluster"))
                 
                 task = asyncio.create_task(asyncio.to_thread(clustererhdb.run, progress_callback=self._progress_callback))
                 self._scan_worker_tasks.append(task)
@@ -884,26 +1070,26 @@ class ImageDedupApp:
         finally:
             print("Процесс завершён.")
             self.scanning = False
-            self.scan_button.text = tr("scan.button.scan")
-            self.scan_button.icon = ft.Icons.SEARCH
-            self.scan_button.bgcolor = ft.Colors.PRIMARY
-            self.progress_bar.visible = False
-            self.progress_text.visible = False
-            self.progress_container.visible = False
-            self.page.update()
+            self.mode_scan_btn.content = tr("scan.button.scan")
+            self.mode_scan_btn.icon = ft.Icons.SEARCH
+            self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self.start_scan_btn.text = tr("scan.button.start")
+            self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
+            self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self._reset_window_progress()
 
     async def toggle_scan(self, e):
         """Запуск/остановка сканирования"""
         if self.scanning:
             # Останавливаем сканирование
             await self._cancel_scan_workers()
-            self.scan_button.text = tr("scan.button.scan")
-            self.scan_button.icon = ft.Icons.SEARCH
-            self.scan_button.bgcolor = ft.Colors.PRIMARY
-            self.progress_bar.visible = False
-            self.progress_text.visible = False
-            self.progress_container.visible = False
-            self.page.update()
+            self.mode_scan_btn.content = tr("scan.button.scan")
+            self.mode_scan_btn.icon = ft.Icons.SEARCH
+            self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self.start_scan_btn.text = tr("scan.button.start")
+            self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
+            self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self._reset_window_progress()
             self.show_snackbar(tr("scan.stopped"), ft.Colors.ORANGE)
             print("Сканирование остановлено пользователем.")
             return
@@ -926,17 +1112,15 @@ class ImageDedupApp:
         
         self.scanning = True
         scanner.STOP_REQUESTED = False
-        self.scan_button.text = tr("scan.button.stop")
-        self.scan_button.icon = ft.Icons.STOP
-        self.scan_button.bgcolor = ft.Colors.ERROR
+        self.mode_scan_btn.content = tr("scan.button.stop")
+        self.mode_scan_btn.icon = ft.Icons.STOP
+        self.mode_scan_btn.bgcolor = ft.Colors.ERROR
+        self.start_scan_btn.text = tr("scan.button.stop")
+        self.start_scan_btn.icon = ft.Icons.STOP
+        self.start_scan_btn.bgcolor = ft.Colors.ERROR
         
-        # Показываем прогресс
-        self.progress_container.visible = True
-        self.progress_bar.visible = True
-        self.progress_text.visible = True
-        self.progress_bar.value = 0
-        self.progress_text.value = tr("progress.prepare")
-        self.page.update()
+        # Показываем прогресс в заголовке окна
+        self._set_window_progress(tr("stage.scan"))
         
         self.scan_task = asyncio.create_task(self._run_scan_workflow(scan_paths))
     
@@ -945,12 +1129,11 @@ class ImageDedupApp:
         if self.exporting:
             self._export_stop_requested = True
             self.exporting = False
-            self.export_button.text = tr("export.button")
+            self.export_button.content = tr("export.button")
             self.export_button.icon = ft.Icons.DOWNLOAD
             self.export_button.bgcolor = ft.Colors.PRIMARY
-            self.progress_container.visible = False
-            self.progress_bar.visible = False
-            self.progress_text.visible = False
+            if not self.scanning:
+                self._reset_window_progress()
             self.page.update()
             self.show_snackbar(tr("export.stopped"), ft.Colors.ORANGE)
             print("Экспорт остановлен пользователем.")
@@ -1011,12 +1194,10 @@ class ImageDedupApp:
         """Полный сброс базы данных, кэша и состояния приложения"""
         if self.scanning:
             await self._cancel_scan_workers()
-            self.scan_button.text = tr("scan.button.scan")
-            self.scan_button.icon = ft.Icons.SEARCH
-            self.scan_button.bgcolor = ft.Colors.PRIMARY
-            self.progress_bar.visible = False
-            self.progress_text.visible = False
-            self.progress_container.visible = False
+            self.mode_scan_btn.content = tr("scan.button.scan")
+            self.mode_scan_btn.icon = ft.Icons.SEARCH
+            self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
+        self._reset_window_progress()
         
         database.clear_all()
         thumbnail_cache.clear()
@@ -1050,16 +1231,7 @@ class ImageDedupApp:
         
         self.page.update()
         self.show_snackbar(tr("reset.done"), ft.Colors.GREEN)
-    
-    def switch_tab(self, index: int):
-        """Переключение вкладки"""
-        self._save_current_gallery_scroll()
-        self.current_tab = index
-        if index == 0:
-            self.show_search_tab()
-        elif index == 1:
-            asyncio.create_task(self.show_export_tab())
-    
+
     def get_selection_state(self, paths: list) -> str:
         """Определить состояние выделения для иконки чекбокса.
         
@@ -1089,85 +1261,30 @@ class ImageDedupApp:
             return ft.Icons.INDETERMINATE_CHECK_BOX
     
     async def show_export_tab(self):
-        """Показать вкладку 'Экспорт' — выбранные файлы в галерее + статистика"""
+        """Показать режим 'Экспорт' — выбранные файлы в галерее (контролы на панели управления)."""
         # Выбранные файлы (только существующие)
         selected_paths = [p for p in self.selected_images if os.path.exists(p)]
         selected_paths.sort()
-        
-        # Поле папки назначения - восстанавливаем сохранённый путь или используем значение по умолчанию
-        saved_export_path = getattr(self, '_export_dest_folder_path', None) or getattr(self.page.session, 'export_dest_folder', None)
-        default_path = saved_export_path if saved_export_path else tr("export.default_folder")
-        
-        self.export_dest_folder = ft.TextField(
-            label=tr("export.folder"),
-            value=default_path,
-            expand=True,
-            on_change=self._on_export_path_changed,
-        )
-        
-        browse_button = ft.IconButton(
-            icon=ft.Icons.FOLDER_OPEN,
-            tooltip=tr("scan.browse"),
-            on_click=lambda e: self.browse_destination_folder(self.export_dest_folder),
-        )
-        self.browse_export_button = browse_button
-        
-        # Кнопка экспорта
-        if self.exporting:
-            export_button = ft.ElevatedButton(
-                tr("export.button.stop"),
-                icon=ft.Icons.STOP,
-                bgcolor=ft.Colors.ERROR,
-                color=ft.Colors.ON_ERROR,
-                tooltip=tr("export.button.stop"),
-                on_click=self.toggle_export,
-            )
-        else:
-            export_button = ft.ElevatedButton(
-                tr("export.button"),
-                icon=ft.Icons.DOWNLOAD,
-                bgcolor=ft.Colors.PRIMARY,
-                color=ft.Colors.ON_PRIMARY,
-                tooltip=tr("export.button"),
-                on_click=self.toggle_export,
-            )
-        self.export_button = export_button
-        
-        # Кнопки управления
-        controls_row = ft.Row(
-            [
-                self.export_dest_folder,
-                browse_button,
-                export_button,
-            ],
-            spacing=10,
-        )
-        
+
         # Сохраняем текущий контекст галереи
         self.current_gallery_paths = selected_paths
         self.current_gallery_scope = "export"
-        
-        # Галерея выбранных файлов
+
         if selected_paths:
             # Показываем индикатор загрузки пока генерируются миниатюры
-            self.tab_content.content = ft.Column(
-                [controls_row, ft.Divider(), ft.ProgressRing()],
-                expand=True,
+            self.tab_content.content = ft.Row(
+                [ft.ProgressRing(width=32, height=32)],
+                alignment=ft.MainAxisAlignment.CENTER,
             )
             self.page.update()
-            
             gallery = await self.create_gallery(selected_paths, "export")
-            content = ft.Column(
-                [controls_row, ft.Divider(), gallery],
-                expand=True,
-            )
+            content = ft.Column([gallery], expand=True)
         else:
             content = ft.Column(
-                [controls_row,
-                 ft.Text(tr("export.none"), size=14, color=ft.Colors.ON_SURFACE_VARIANT)],
+                [ft.Text(tr("export.none"), size=14, color=ft.Colors.ON_SURFACE_VARIANT)],
                 expand=True,
             )
-        
+
         self.tab_content.content = content
         self.page.update()
         if selected_paths:
@@ -1182,7 +1299,7 @@ class ImageDedupApp:
         
         self.exporting = True
         self._export_stop_requested = False
-        self.export_button.text = tr("export.button.stop")
+        self.export_button.content = tr("export.button.stop")
         self.export_button.icon = ft.Icons.STOP
         self.export_button.bgcolor = ft.Colors.ERROR
         
@@ -1195,13 +1312,8 @@ class ImageDedupApp:
         total_files = len(selected_paths)
         total_copied = 0
         
-        self.progress_container.visible = True
-        self.progress_bar.visible = True
-        self.progress_text.visible = True
-        self.progress_bar.value = 0
-        self.progress_text.value = tr("progress.export.prepare")
-        self.page.update()
-        
+        self._set_window_progress(tr("stage.export"))
+
         used_names = set()
         
         def copy_files():
@@ -1228,19 +1340,16 @@ class ImageDedupApp:
         # Сбрасываем UI только если экспорт не был остановлен
         if self.exporting:
             self.exporting = False
-            self.export_button.text = tr("export.button")
+            self.export_button.content = tr("export.button")
             self.export_button.icon = ft.Icons.DOWNLOAD
             self.export_button.bgcolor = ft.Colors.PRIMARY
-            self.progress_container.visible = False
-            self.progress_bar.visible = False
-            self.progress_text.visible = False
+            if not self.scanning:
+                self._reset_window_progress()
             self.page.update()
             self.show_snackbar(tr("export.copied", count=total_copied, dest=dest_path), ft.Colors.GREEN)
 
     def _update_export_progress(self, current: int, total: int, progress: float):
-        self.progress_bar.value = progress
-        self.progress_text.value = tr("progress.export.step", cur=current, total=total, percent=int(progress * 100))
-        self.page.update()
+        self._set_window_progress(tr("stage.export"), current, total)
 
     async def show_clusters_tab(self):
         """Показать вкладку 'Категории'"""
@@ -1267,79 +1376,40 @@ class ImageDedupApp:
         
         # Кнопка "Выбрать/Снять все" с интерактивной иконкой
         selection_state = self.get_selection_state(members)
-        self.cluster_select_all_icon_button = ft.IconButton(
-            icon=self.get_checkbox_icon(selection_state),
-            tooltip=tr("select_all.toggle"),
-            on_click=lambda e: self.toggle_select_all(members),
-        )
-        
+        self.cluster_select_all_icon_button.icon = self.get_checkbox_icon(selection_state)
+        self.cluster_select_all_icon_button.tooltip = tr("select_all.toggle")
+        self.cluster_select_all_icon_button.on_click = lambda e: self.toggle_select_all(members)
+
         # Счётчик выбранных
-        self.selected_count_text = ft.Text(tr("selected.count", count=len([p for p in members if p in self.selected_images])), size=14)
-        
-        # Кнопки управления (без копирования)
-        controls_row = ft.Row(
-            [
-                self.cluster_select_all_icon_button,
-                self.selected_count_text,
-            ],
-            spacing=10,
-        )
-        
+        self.selected_count_text.value = tr("selected.count", count=len([p for p in members if p in self.selected_images]))
+
         # Сохраняем текущий контекст галереи
         self.current_gallery_paths = members
         self.current_gallery_scope = f"cluster_{cluster_id}"
-        
+
         # Показываем индикатор загрузки пока генерируются миниатюры
-        self.tab_content.content = ft.Column(
-            [controls_row, ft.Divider(), ft.ProgressRing()],
-            expand=True,
+        self.tab_content.content = ft.Row(
+            [ft.ProgressRing(width=32, height=32)],
+            alignment=ft.MainAxisAlignment.CENTER,
         )
         self.page.update()
-        
+
         gallery = await self.create_gallery(members, f"cluster_{cluster_id}")
-        
+
         self.tab_content.content = ft.Column(
-            [controls_row, ft.Divider(), gallery],
+            [gallery],
             expand=True,
         )
         self.page.update()
         self._restore_gallery_scroll(gallery, f"cluster_{cluster_id}", members, 100)
     
     def show_search_tab(self):
-        """Показать вкладку 'Поиск'"""
-        # Создаём элементы только один раз, чтобы сохранять состояние
-        # (введённый текст и результаты) при переключении вкладок
-        if not hasattr(self, 'search_input'):
-            self.search_input = ft.TextField(
-                label=tr("search.label"),
-                hint_text=tr("search.hint"),
-                expand=True,
-                on_submit=self.do_search,
-            )
-            
-            self.search_button = ft.ElevatedButton(
-                tr("search.button"),
-                icon=ft.Icons.SEARCH,
-                tooltip=tr("search.button"),
-                on_click=self.do_search,
-            )
-            
-            self.search_results_container = ft.Column(
-                expand=True,
-            )
-        
+        """Показать режим 'Поиск' (контролы поиска на панели управления, здесь только результаты)."""
         # Сохраняем текущий контекст галереи
         self.current_gallery_scope = "search_results"
         self.current_gallery_paths = getattr(self, 'search_result_paths', [])
-        
-        self.tab_content.content = ft.Column(
-            [
-                ft.Row([self.search_input, self.search_button], spacing=10),
-                ft.Divider(),
-                self.search_results_container,
-            ],
-            expand=True,
-        )
+
+        self.tab_content.content = self.search_results_container
         self.page.update()
     
     async def do_search(self, e):

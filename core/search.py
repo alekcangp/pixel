@@ -20,6 +20,42 @@ except ImportError:
 
 
 # ============================================================
+# FAISS-индекс (строится в памяти, без дискового кэша)
+# ============================================================
+
+_cache = {
+    "embeddings": None,
+    "paths": None,
+    "index": None,
+}
+
+
+def build_index(embeddings):
+    """Строит нормализованный FAISS-индекс для косинусного сходства.
+
+    Векторы L2-нормализуются здесь (на лету, в памяти), т.к. в БД хранятся
+    исходные векторы. IndexFlatIP + normalize_L2 = косинусное сходство.
+    """
+    emb = embeddings.astype("float32")
+    faiss.normalize_L2(emb)
+    index = faiss.IndexFlatIP(emb.shape[1])
+    index.add(emb)
+    return index
+
+
+def get_or_build_index(embeddings, paths):
+    """Возвращает индекс, строя его в памяти и кэшируя.
+
+    Выполняется быстро (нормализация + add = O(N·D)); индекс строится один раз
+    за процесс и переиспользуется через _cache. Дисковый кэш не используется
+    намеренно — построение дешёвое, а фоновый prefetch_index скрывает задержку.
+    """
+    if _cache["index"] is None:
+        _cache["index"] = build_index(embeddings)
+    return _cache["index"]
+
+
+# ============================================================
 # Поиск по pHash (LSH)
 # ============================================================
 
@@ -110,27 +146,37 @@ def run_hash_search(image_path, top_k=None):
 # ============================================================
 
 
-# Кэш для индекса и эмбеддингов (чтобы не перестраивать при каждом поиске)
-_cache = {
-    "embeddings": None,
-    "paths": None,
-    "index": None,
-}
-
-
 def clear_cache():
-    """Сбрасывает кэш эмбеддингов и FAISS-индекса."""
+    """Сбрасывает кэш эмбеддингов и FAISS-индекса (в памяти)."""
     _cache["embeddings"] = None
     _cache["paths"] = None
     _cache["index"] = None
 
 
-def build_index(embeddings):
-    emb = embeddings.astype("float32")
-    faiss.normalize_L2(emb)
-    index = faiss.IndexFlatIP(emb.shape[1])
-    index.add(emb)
-    return index
+def _load_embeddings_sync():
+    """Загружает эмбеддинги из БД с кэшированием в памяти.
+
+    Returns:
+        (embeddings, paths) или (None, None), если эмбеддингов нет.
+    """
+    if _cache["embeddings"] is None or _cache["paths"] is None:
+        embeddings, paths = database.load_embeddings()
+        if embeddings is None:
+            return None, None
+        _cache["embeddings"] = embeddings
+        _cache["paths"] = paths
+    return _cache["embeddings"], _cache["paths"]
+
+
+def prefetch_index():
+    """Предзагружает эмбеддинги и FAISS-индекс в фоне (вызывается при старте).
+
+    Заполняет _cache эмбеддингами и готовит индекс (из дискового кэша или
+    перестраивая его), чтобы первый поиск выполнялся мгновенно.
+    """
+    embeddings, paths = _load_embeddings_sync()
+    if embeddings is not None:
+        get_or_build_index(embeddings, paths)
 
 
 def embed_query(embedder, text):
@@ -144,9 +190,13 @@ def embed_query(embedder, text):
 
 
 def run(query, top_k=None, threshold=None):
-    """Семантический поиск."""
-    if top_k is None:
-        top_k = config.SEARCH_TOP_K
+    """Семантический поиск.
+
+    Фильтруем СРАЗУ по порогу через range_search: сначала узнаём близость
+    лучшего результата, вычисляем min_score = best - threshold и запрашиваем
+    у FAISS только тех, чья близость реально выше порога. Так кандидаты
+    никогда не "закончатся раньше", чем сработает порог.
+    """
     if threshold is None:
         threshold = config.SEARCH_THRESHOLD
 
@@ -155,41 +205,60 @@ def run(query, top_k=None, threshold=None):
         print("Установите torch для использования семантического поиска: pip install torch")
         return []
 
-    if _cache["embeddings"] is None or _cache["paths"] is None:
-        embeddings, paths = database.load_embeddings()
-        if embeddings is None:
-            print("Эмбеддинги не найдены. Сначала выполните: python main.py embed")
-            return []
-        _cache["embeddings"] = embeddings
-        _cache["paths"] = paths
-    else:
-        embeddings = _cache["embeddings"]
-        paths = _cache["paths"]
+    embeddings, paths = _load_embeddings_sync()
+    if embeddings is None:
+        print("Эмбеддинги не найдены. Сначала выполните: python main.py embed")
+        return []
 
-    if _cache["index"] is None:
-        print("Построение FAISS-индекса...")
-        _cache["index"] = build_index(embeddings)
+    # Индекс строится в памяти один раз и кэшируется (см. get_or_build_index);
+    # prefetch_index предзагружает его в фоне при старте приложения.
+    index = get_or_build_index(embeddings, paths)
 
     print("Поиск: \"%s\"" % query)
     embedder = get_embedder()
     q = embed_query(embedder, query)
-    index = _cache["index"]
 
-    top_k = min(top_k, len(paths))
-    scores, indices = index.search(q, top_k)
+    # Узнаём близость лучшего результата, чтобы вычислить абсолютный порог.
+    best = 0.0
+    if len(paths) > 0:
+        best_scores, _ = index.search(q, 1)
+        best = float(best_scores[0][0]) if best_scores.size > 0 else 0.0
 
-    all_results = []
-    for score, idx in zip(scores[0], indices[0]):
-        if idx >= len(paths):
-            continue
-        all_results.append((paths[idx], float(score)))
-
-    if threshold > 0.0 and all_results:
-        best = all_results[0][1]
+    if threshold > 0.0 and best > 0.0:
+        # Минимальная близость для попадания в результат.
         min_score = best - threshold
-        results = [(p, s) for p, s in all_results if s >= min_score]
+        # range_search возвращает ВСЕ векторы с близостью >= min_score
+        # (не ограничиваясь заранее заданным top_k кандидатов).
+        lims, D, I = index.range_search(q, min_score)
+        start, end = int(lims[0]), int(lims[1])
+
+        pairs = []
+        for j in range(start, end):
+            idx = int(I[j])
+            if idx < len(paths):
+                pairs.append((float(D[j]), idx))
+
+        # Сортируем по убыванию близости (самое похожее первым).
+        pairs.sort(key=lambda x: x[0], reverse=True)
+
+        all_results = [(paths[idx], score) for score, idx in pairs]
     else:
-        results = all_results
+        # Порог не задан/не сработал — возвращаем всех (или top_k как потолок).
+        if top_k is None or top_k <= 0:
+            top_k = len(paths)
+        top_k = min(top_k, len(paths))
+        scores, indices = index.search(q, top_k)
+        all_results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < len(paths):
+                all_results.append((paths[idx], float(score)))
+
+    # top_k — защитный потолок на случай слишком мягкого порога
+    # (например, threshold=0, когда все изображения прошли бы порог).
+    if top_k is not None and top_k > 0:
+        all_results = all_results[:top_k]
+
+    results = all_results
 
     print("\nНайдено результатов: %d" % len(results))
     for i, (path, score) in enumerate(results):

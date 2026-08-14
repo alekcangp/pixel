@@ -110,6 +110,9 @@ class ImageDedupApp:
         # Кэш для path_to_cluster_map (оптимизация производительности)
         self._cached_path_to_cluster = None
         self._cached_path_to_cluster_scope = None
+        # Кэш карты кластеров для активной галереи поиска (чтобы не перестраивать
+        # её на каждом скролле в load_more — итерация по всем кластерам дорогая).
+        self._gallery_path_to_cluster = None
         
         # Flet FilePicker removed - using tkinter fallback for folder selection
         # (Flet 0.86.5 FilePicker has runtime issues on desktop)
@@ -302,10 +305,13 @@ class ImageDedupApp:
         self.load_stats()
         # Перестраиваем текущую вкладку на новом языке
         if self.current_tab == -1:
+            self._reset_gallery_lazy_loading("cluster")
             asyncio.create_task(self.show_clusters_tab())
         elif self.current_tab == 0:
+            self._reset_gallery_lazy_loading("search_results")
             self.show_search_tab()
         elif self.current_tab == 1:
+            self._reset_gallery_lazy_loading("export")
             asyncio.create_task(self.show_export_tab())
         self.page.update()
 
@@ -797,6 +803,15 @@ class ImageDedupApp:
             await asyncio.to_thread(get_embedder)
             self.model_loaded = True
             self._model_status_error = None
+
+            # Фоновая предзагрузка FAISS-индекса: строим/читаем с диска заранее,
+            # чтобы первый поиск не ждал ни модель, ни построение индекса.
+            # Выполняем в отдельном потоке, чтобы не блокировать UI event loop.
+            try:
+                from core import search as search_mod
+                await asyncio.to_thread(search_mod.prefetch_index)
+            except Exception as _ie:
+                print(f"Prefetch FAISS index error: {_ie}")
         except Exception as e:
             self._model_status_error = str(e)
         finally:
@@ -891,6 +906,21 @@ class ImageDedupApp:
                 asyncio.create_task(do_restore())
         except Exception:
             pass
+
+    def _reset_gallery_lazy_loading(self, scope: str):
+        """Сброс lazy loading state для указанного scope при смене вкладки."""
+
+        # Сбрасываем offset до 0
+        offset_key = f"gallery_offset_{scope}"
+        setattr(self.page.session, offset_key, 0)
+
+        # Сбрасываем флаг загрузки
+        loading_key = f"gallery_loading_{scope}"
+        setattr(self.page.session, loading_key, False)
+
+        # Сбрасываем позицию скролла
+        scroll_key = f"gallery_scroll_{scope}"
+        setattr(self.page.session, scroll_key, 0)
 
     def _progress_callback(self, stage: str, current: int, total: int, message: str):
         """Callback для обновления прогресса из фоновых потоков.
@@ -1257,6 +1287,9 @@ class ImageDedupApp:
     
     async def show_export_tab(self):
         """Показать режим 'Экспорт' — выбранные файлы в галерее (контролы на панели управления)."""
+        # Сброс lazy loading state для export scope при переключении вкладки
+        self._reset_gallery_lazy_loading("export")
+        
         # Выбранные файлы (только существующие)
         selected_paths = [p for p in self.selected_images if os.path.exists(p)]
         selected_paths.sort()
@@ -1282,9 +1315,8 @@ class ImageDedupApp:
 
         self.tab_content.content = content
         self.page.update()
-        if selected_paths:
-            self._restore_gallery_scroll(gallery, "export", selected_paths, 100)
-    
+        # Восстанавливаем позицию скролла при смене вкладки на экспорт
+        self._restore_gallery_scroll(gallery, "export", selected_paths, page_size)
     async def _run_export(self):
         """Экспорт выбранных файлов в одну папку без разделения по категориям"""
         selected_paths = [p for p in self.selected_images if os.path.exists(p)]
@@ -1348,6 +1380,9 @@ class ImageDedupApp:
 
     async def show_clusters_tab(self):
         """Показать вкладку 'Категории'"""
+        # Сброс lazy loading state для cluster scope при переключении вкладки
+        self._reset_gallery_lazy_loading("cluster")
+        
         if not self.clusters:
             self.tab_content.content = ft.Text(tr("categories.empty"))
             self.page.update()
@@ -1396,10 +1431,14 @@ class ImageDedupApp:
             expand=True,
         )
         self.page.update()
+        # Восстанавливаем позицию скролла при смене вкладки на категории
         self._restore_gallery_scroll(gallery, f"cluster_{cluster_id}", members, 100)
     
     def show_search_tab(self):
         """Показать режим 'Поиск' (контролы поиска на панели управления, здесь только результаты)."""
+        # Сброс lazy loading state для search_results scope при переключении вкладки
+        self._reset_gallery_lazy_loading("search_results")
+        
         # Сохраняем текущий контекст галереи
         self.current_gallery_scope = "search_results"
         self.current_gallery_paths = getattr(self, 'search_result_paths', [])
@@ -1431,17 +1470,18 @@ class ImageDedupApp:
             setattr(self.page.session, session_key, 0)
             setattr(self.page.session, "gallery_scroll_search_results", 0)
             
-            # Поиск в фоне. top_k = 1000 — берём максимум, затем фильтруем
-            # по порогу близости в core/search.py (динамическое количество).
+            # Поиск в фоне. top_k (SEARCH_TOP_K) — защитный максимум кандидатов,
+            # а не жёсткое ограничение результата: количество решает порог
+            # SEARCH_THRESHOLD (все, кто прошёл порог, попадают в галерею).
             results = await asyncio.to_thread(
                 search.run,
                 query,
-                top_k=1000
+                top_k=config.SEARCH_TOP_K
             )
             
             if results:
-                paths = [p for p, _ in results]
-                paths.sort()
+                # Сортируем результаты по близости (от наиболее похожих к менее)
+                paths = [p for p, _ in results]  # results уже отсортированы по score в core/search.py
                 self.search_result_paths = paths
                 self.current_gallery_paths = paths
                 gallery = await self.create_gallery(paths, "search_results")
@@ -1769,8 +1809,15 @@ class ImageDedupApp:
             self.stat_selected.value = str(total_files)
             self.stat_selected_size.value = _format_size(total_size_bytes)
         
-        # Для поиска и экспорта строим map path -> cluster_id (один раз)
-        path_to_cluster = self._get_path_to_cluster_map(paths) if scope in ("search_results", "export") else None
+        # Для поиска строим map path -> cluster_id (один раз).
+        # Сохраняем в self._gallery_path_to_cluster, чтобы load_more не
+        # перестраивал эту дорогую карту на каждом скролле.
+        if scope == "search_results":
+            self._gallery_path_to_cluster = self._get_path_to_cluster_map(paths)
+            path_to_cluster = self._gallery_path_to_cluster
+        else:
+            self._gallery_path_to_cluster = None
+            path_to_cluster = None
         
         # Состояние для lazy loading.
         # Важный фикс: после открытия новой галереи (кластер, поиск, export)
@@ -1952,8 +1999,9 @@ class ImageDedupApp:
             if not page_paths:
                 return
 
-            # Для поиска и экспорта строим map path -> cluster_id
-            path_to_cluster = self._get_path_to_cluster_map(paths) if scope in ("search_results", "export") else None
+            # Для поиска используем карту кластеров, построенную один раз
+            # в create_gallery (не перестраиваем её на каждом скролле).
+            path_to_cluster = self._gallery_path_to_cluster if scope == "search_results" else None
 
             # Генерируем миниатюры параллельно в фоновом режиме (12 потоков)
             thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=12)

@@ -11,3 +11,4 @@ storage/*.db
 storage/*.db-journal
 storage/*.db-wal
 storage/*.db-shm
+storage/faiss_index.*

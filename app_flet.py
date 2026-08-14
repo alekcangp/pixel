@@ -1419,12 +1419,7 @@ class ImageDedupApp:
             # Показываем индикатор загрузки
             self.search_results_container.controls = [
                 ft.Container(
-                    content=ft.Row(
-                        [ft.ProgressRing(width=32, height=32), ft.Text(tr("search.running"), size=14)],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=10,
-                    ),
+                    content=ft.ProgressRing(width=32, height=32),
                     alignment=ft.Alignment.CENTER,
                     expand=True,
                 ),
@@ -1471,22 +1466,48 @@ class ImageDedupApp:
             self.page.update()
             self.show_snackbar(tr("search.error", error=e), ft.Colors.RED)
     
-    def _get_path_to_cluster_map(self):
-        """Возвращает dict {path: cluster_id} для всех изображений в кластерах.
+    def _get_path_to_cluster_map(self, paths: list = None):
+        """Возвращает dict {path: cluster_id} для изображений в кластерах.
         
         Оптимизировано с кэшированием - перестраивается только при изменении кластеров.
+        
+        Args:
+            paths: если указан, возвращает map только для этих путей (дешевле,
+                   особенно для export scope, где paths = только выбранные файлы).
         """
-        # Проверяем, нужно ли обновлять кэш
+        # Быстрый путь: кластеры уже в памяти — фильтруем по нужным путям
+        if self.clusters and paths is not None:
+            target = set(str(p) for p in paths)
+            path_to_cluster = {}
+            for cluster_id, members in self.clusters.items():
+                for p in members:
+                    if p in target:
+                        path_to_cluster[p] = cluster_id
+            return path_to_cluster
+        
+        # Проверяем, нужно ли обновлять кэш (только для полной перестройки)
         if (self._cached_path_to_cluster is not None and 
             self._cached_path_to_cluster_scope == id(self.clusters)):
-            return self._cached_path_to_cluster
+            if paths is None:
+                return self._cached_path_to_cluster
+            target = set(str(p) for p in paths)
+            return {p: cid for p, cid in self._cached_path_to_cluster.items() if p in target}
         
-        # Перестраиваем кэш
-        clusters = self.clusters or database.load_clusters() or {}
-        path_to_cluster = {}
-        for cluster_id, members in clusters.items():
-            for path in members:
-                path_to_cluster[path] = cluster_id
+        # Перестраиваем кэш из БД
+        if paths is not None:
+            target = set(str(p) for p in paths)
+            placeholders = ",".join("?" for _ in target)
+            rows = database.conn.execute(
+                f"SELECT i.path, c.cluster_id FROM clusters c JOIN images i ON c.image_id = i.id WHERE i.path IN ({placeholders})",
+                list(target),
+            ).fetchall()
+            path_to_cluster = {r["path"]: r["cluster_id"] for r in rows}
+        else:
+            clusters = self.clusters or database.load_clusters() or {}
+            path_to_cluster = {}
+            for cluster_id, members in clusters.items():
+                for path in members:
+                    path_to_cluster[path] = cluster_id
         
         self._cached_path_to_cluster = path_to_cluster
         self._cached_path_to_cluster_scope = id(self.clusters)
@@ -1749,7 +1770,7 @@ class ImageDedupApp:
             self.stat_selected_size.value = _format_size(total_size_bytes)
         
         # Для поиска и экспорта строим map path -> cluster_id (один раз)
-        path_to_cluster = self._get_path_to_cluster_map() if scope in ("search_results", "export") else None
+        path_to_cluster = self._get_path_to_cluster_map(paths) if scope in ("search_results", "export") else None
         
         # Состояние для lazy loading.
         # Важный фикс: после открытия новой галереи (кластер, поиск, export)
@@ -1917,6 +1938,13 @@ class ImageDedupApp:
                 offset = 0
                 setattr(self.page.session, session_key, 0)
 
+            if offset >= len(paths):
+                idx = self._find_loading_indicator(gallery)
+                if idx is not None:
+                    gallery.controls.pop(idx)
+                    self.page.update()
+                return
+
             # Грузим только следующую часть от актуального offset, а не перескакиваем
             # на +page_size в индексе, иначе при возврате к галерее open/restore
             # можно пропустить начало или получить дырки в списке.
@@ -1925,7 +1953,7 @@ class ImageDedupApp:
                 return
 
             # Для поиска и экспорта строим map path -> cluster_id
-            path_to_cluster = self._get_path_to_cluster_map() if scope in ("search_results", "export") else None
+            path_to_cluster = self._get_path_to_cluster_map(paths) if scope in ("search_results", "export") else None
 
             # Генерируем миниатюры параллельно в фоновом режиме (12 потоков)
             thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=12)

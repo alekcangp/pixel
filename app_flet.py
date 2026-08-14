@@ -666,7 +666,11 @@ class ImageDedupApp:
             tooltip=tr("search.button"),
             on_click=self.do_search,
         )
-        self.search_results_container = ft.Column(expand=True)
+        self.search_results_container = ft.Column(
+            expand=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
         self.search_context_row = ft.Row(
             [self.search_input, self.search_button],
             spacing=10,
@@ -1414,8 +1418,16 @@ class ImageDedupApp:
         try:
             # Показываем индикатор загрузки
             self.search_results_container.controls = [
-                ft.ProgressRing(),
-                ft.Text(tr("search.running"), size=14),
+                ft.Container(
+                    content=ft.Row(
+                        [ft.ProgressRing(width=32, height=32), ft.Text(tr("search.running"), size=14)],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=10,
+                    ),
+                    alignment=ft.Alignment.CENTER,
+                    expand=True,
+                ),
             ]
             self.page.update()
             

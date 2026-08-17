@@ -1,4 +1,7 @@
+# macOS
 .DS_Store
+
+# Python
 __pycache__/
 *.pyc
 .env
@@ -7,8 +10,27 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Локальные БД и индексы (генерируются при работе)
 storage/*.db
 storage/*.db-journal
 storage/*.db-wal
 storage/*.db-shm
 storage/faiss_index.*
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Логи
+*.log
+
+# Локальные инструменты IDE / агенты (не часть проекта)
+.cursor/
+.kilocode/
+.kilo/
+.flet/
+
+# Индексы и временные данные
+*.npy
+*.index

@@ -1,5 +1,12 @@
 import argparse
+import os
 import sys
+
+# ВАЖНО: до импорта torch/faiss ограничиваем OpenMP одним потоком.
+# На Apple Silicon (MPS) иначе PyTorch создаёт OMP-потоки по числу ядер CPU,
+# что на macOS приводит к "OMP: Error #179" и segmentation fault при
+# фоновой загрузке SigLIP-модели в GUI.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import config
 

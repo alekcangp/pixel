@@ -152,6 +152,28 @@ def load_selected_files(scope="global"):
         conn.close()
 
 
+def get_selected_files_stats(scope="global"):
+    """Возвращает (количество, суммарный размер в байтах) выбранных файлов.
+
+    Данные берутся из БД (join selected_files -> images), без обращения
+    к файловой системе. Это мгновенно, даже если файлы лежат на внешнем диске.
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(i.size), 0)
+            FROM selected_files s
+            JOIN images i ON i.path = s.path
+            WHERE s.scope = ?
+            """,
+            (scope,),
+        ).fetchone()
+        return (row[0], row[1]) if row else (0, 0)
+    finally:
+        conn.close()
+
+
 # ============================================================
 # Images (сканирование)
 # ============================================================

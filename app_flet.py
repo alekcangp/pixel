@@ -8,6 +8,13 @@ import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
 from PIL import Image as PILImage
+
+# ВАЖНО: до импорта torch/faiss ограничиваем OpenMP одним потоком.
+# Иначе на Apple Silicon (MPS) при фоновой загрузке SigLIP-модели PyTorch
+# создаёт по потоку на ядро CPU, что приводит к
+# "OMP: Error #179: pthread_mutex_init failed" и segmentation fault при запуске GUI.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import config
 from i18n import LANG, tr, set_language, is_all_disks
 from core import database, scanner, dedup, embedder, clustererhdb, search, thumbnail_cache
@@ -120,8 +127,10 @@ class ImageDedupApp:
         # Создаём UI
         self.create_layout()
         
-        # Загружаем статистику
-        self.load_stats()
+        # Загружаем статистику асинхронно, чтобы тяжёлые обращения к файлам
+        # (например, к выбранным изображениям на внешнем диске) не блокировали
+        # отрисовку окна при запуске.
+        self.page.run_task(self.load_stats)
         
         # Показываем первый кластер по умолчанию
         self.page.run_task(self.show_clusters_tab)
@@ -818,10 +827,10 @@ class ImageDedupApp:
             self.model_loading = False
             self.page.update()
     
-    def load_stats(self):
-        """Загрузка статистики из БД"""
+    async def load_stats(self):
+        """Загрузка статистики из БД (асинхронно, чтобы не блокировать UI)."""
         try:
-            stats = database.load_db_stats()
+            stats = await asyncio.to_thread(database.load_db_stats)
             
             self.stat_total.value = str(stats["total"])
             self.stat_duplicates.value = str(stats["duplicates"])
@@ -833,27 +842,21 @@ class ImageDedupApp:
             
             # Размер дубликатов и уникальных — вычисляем из БД
             try:
-                dup_size = database.get_duplicates_size()
+                dup_size = await asyncio.to_thread(database.get_duplicates_size)
                 self.stat_duplicates_size.value = _format_size(dup_size)
                 self.stat_unique_size.value = _format_size(max(total_size - dup_size, 0))
             except Exception:
                 self.stat_duplicates_size.value = "—"
                 self.stat_unique_size.value = "—"
             
-            # Обновляем статистику выбранных файлов
-            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
-            total_files = len(selected_paths)
-            total_size_bytes = 0
-            for path in selected_paths:
-                try:
-                    total_size_bytes += os.path.getsize(path)
-                except:
-                    pass
-            self.stat_selected.value = str(total_files)
+            # Обновляем статистику выбранных файлов (мгновенно из БД,
+            # без обращения к файловой системе — файлы могут быть на внешнем диске)
+            selected_count, total_size_bytes = database.get_selected_files_stats()
+            self.stat_selected.value = str(selected_count)
             self.stat_selected_size.value = _format_size(total_size_bytes)
             
             # Загрузить кластеры и их имена
-            clusters, cluster_names = database.load_clusters_with_names()
+            clusters, cluster_names = await asyncio.to_thread(database.load_clusters_with_names)
             old_clusters_id = id(self.clusters) if self.clusters else None
             self.clusters = clusters or {}
             self.cluster_names = cluster_names or {}
@@ -868,6 +871,22 @@ class ImageDedupApp:
             self.page.update()
         except Exception as e:
             print(f"Ошибка загрузки статистики: {e}")
+
+    def _update_selected_stats_async(self):
+        """Обновляет статистику выбранных файлов в боковой панели из БД.
+
+        Использует уже сохранённые в БД размеры (не ходит в файловую систему),
+        поэтому работает мгновенно даже для файлов на внешнем диске.
+        """
+        try:
+            selected_count, total_size_bytes = database.get_selected_files_stats()
+            if hasattr(self, 'stat_selected'):
+                self.stat_selected.value = str(selected_count)
+            if hasattr(self, 'stat_selected_size'):
+                self.stat_selected_size.value = _format_size(total_size_bytes)
+            self.page.update()
+        except Exception as e:
+            print(f"Ошибка обновления статистики выбранных: {e}")
     
     def _find_gallery(self, control):
         """Рекурсивно ищет GridView в дереве контролов."""
@@ -1290,9 +1309,9 @@ class ImageDedupApp:
         # Сброс lazy loading state для export scope при переключении вкладки
         self._reset_gallery_lazy_loading("export")
         
-        # Выбранные файлы (только существующие)
-        selected_paths = [p for p in self.selected_images if os.path.exists(p)]
-        selected_paths.sort()
+        # Выбранные файлы — пути берём из БД (без обращения к файловой системе,
+        # чтобы переключение на экспорт не зависало на внешнем диске).
+        selected_paths = sorted(self.selected_images)
 
         # Сохраняем текущий контекст галереи
         self.current_gallery_paths = selected_paths
@@ -1319,7 +1338,7 @@ class ImageDedupApp:
         self._restore_gallery_scroll(gallery, "export", selected_paths, page_size)
     async def _run_export(self):
         """Экспорт выбранных файлов в одну папку без разделения по категориям"""
-        selected_paths = [p for p in self.selected_images if os.path.exists(p)]
+        selected_paths = sorted(self.selected_images)
         if not selected_paths:
             self.show_snackbar(tr("export.none_selected"), ft.Colors.ORANGE)
             return
@@ -1796,18 +1815,9 @@ class ImageDedupApp:
         if saved_selection:
             self.selected_images.update(saved_selection)
         
-        # Обновляем статистику выбранных в боковой панели
+        # Обновляем статистику выбранных в боковой панели (в фоновом потоке)
         if hasattr(self, 'stat_selected'):
-            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
-            total_files = len(selected_paths)
-            total_size_bytes = 0
-            for path in selected_paths:
-                try:
-                    total_size_bytes += os.path.getsize(path)
-                except:
-                    pass
-            self.stat_selected.value = str(total_files)
-            self.stat_selected_size.value = _format_size(total_size_bytes)
+            self._update_selected_stats_async()
         
         # Для поиска строим map path -> cluster_id (один раз).
         # Сохраняем в self._gallery_path_to_cluster, чтобы load_more не
@@ -2081,18 +2091,9 @@ class ImageDedupApp:
             selected_in_view = len([p for p in self.current_gallery_paths if p in self.selected_images])
             self.selected_count_text.value = tr("selected.count", count=selected_in_view)
         
-        # Обновляем статистику выбранных в боковой панели
+        # Обновляем статистику выбранных в боковой панели (из БД, мгновенно)
         if hasattr(self, 'stat_selected'):
-            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
-            total_files = len(selected_paths)
-            total_size_bytes = 0
-            for path in selected_paths:
-                try:
-                    total_size_bytes += os.path.getsize(path)
-                except:
-                    pass
-            self.stat_selected.value = str(total_files)
-            self.stat_selected_size.value = _format_size(total_size_bytes)
+            self._update_selected_stats_async()
         
         # Обновляем иконку "Выбрать/Снять все"
         if self.current_gallery_scope == "overview" and hasattr(self, 'select_all_icon_button'):
@@ -2119,18 +2120,9 @@ class ImageDedupApp:
         
         self.show_snackbar(tr("selected.files", count=len(self.selected_images)), ft.Colors.BLUE)
         
-        # Обновляем статистику выбранных в боковой панели
+        # Обновляем статистику выбранных в боковой панели (в фоновом потоке)
         if hasattr(self, 'stat_selected'):
-            selected_paths = [p for p in self.selected_images if os.path.exists(p)]
-            total_files = len(selected_paths)
-            total_size_bytes = 0
-            for path in selected_paths:
-                try:
-                    total_size_bytes += os.path.getsize(path)
-                except:
-                    pass
-            self.stat_selected.value = str(total_files)
-            self.stat_selected_size.value = _format_size(total_size_bytes)
+            self._update_selected_stats_async()
         
         # Обновляем текущую вкладку
         if self.current_tab == -1:

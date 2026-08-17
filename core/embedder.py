@@ -7,6 +7,12 @@ import warnings
 import numpy as np
 from PIL import Image, ImageFile, ImageOps
 
+# Ограничение потоков OpenMP до 1: PyTorch на Apple Silicon (MPS) при
+# инициализации модели в фоновом потоке (asyncio.to_thread) создаёт столько
+# OMP-потоков, сколько ядер CPU, что на macOS приводит к
+# "OMP: Error #179: Function pthread_mutex_init failed" и segmentation fault
+# при запуске GUI. Эту переменную надо выставить ДО импорта torch.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 warnings.filterwarnings("ignore")

@@ -84,6 +84,8 @@ class ImageDedupApp:
         self.scanning = False
         self.scan_task = None
         self._scan_worker_tasks = []
+        self._prewarm_task = None
+        self._prewarm_title_owner = False
         self.exporting = False
         self.export_task = None
         self._export_stop_requested = False
@@ -96,6 +98,10 @@ class ImageDedupApp:
         self._win_progress_stage = None
         self._win_progress_current = 0
         self._win_progress_total = 0
+        # Стабильный идентификатор «владельца» заголовка (напр. "prewarm").
+        # Не зависит от языка, поэтому сброс заголовка не ломается при
+        # переключении языка во время фоновой генерации миниатюр.
+        self._win_progress_key = None
 
         
         # Состояние выбора изображений
@@ -287,11 +293,18 @@ class ImageDedupApp:
         """Возвращает абсолютный путь к обоям в assets/."""
         return os.path.join(config.BASE_DIR, "assets", filename)
 
-    def _set_window_progress(self, label: str, current: int = 0, total: int = 0):
-        """Показывает стадию и счётчик в заголовке окна, напр. 'Сканирование... 3/100'."""
+    def _set_window_progress(self, label: str, current: int = 0, total: int = 0, key: str = None):
+        """Показывает стадию и счётчик в заголовке окна, напр. 'Сканирование... 3/100'.
+
+        key — стабильный идентификатор владельца заголовка (напр. "prewarm",
+        "scan", "export"). Если не задан, используется сам label; для проверки
+        «чей сейчас заголовок» сравнивайте именно key, а не локализованную
+        строку label (она меняется при переключении языка).
+        """
         self._win_progress_stage = label
         self._win_progress_current = current
         self._win_progress_total = total
+        self._win_progress_key = key if key is not None else label
         if total and total > 0:
             self.page.title = f"{label}... {current}/{total}"
         else:
@@ -303,6 +316,7 @@ class ImageDedupApp:
         self._win_progress_stage = None
         self._win_progress_current = 0
         self._win_progress_total = 0
+        self._win_progress_key = None
         self.page.title = tr("app.title")
         self.page.update()
 
@@ -311,7 +325,7 @@ class ImageDedupApp:
         set_language(lang)
         self._current_lang = lang
         self._apply_language()
-        self.load_stats()
+        self.page.run_task(self.load_stats)
         # Перестраиваем текущую вкладку на новом языке
         if self.current_tab == -1:
             self._reset_gallery_lazy_loading("cluster")
@@ -1072,7 +1086,7 @@ class ImageDedupApp:
                 return
 
             # Обновляем статистику после дедупликации (дубликаты уже сохранены в БД)
-            self.load_stats()
+            await self.load_stats()
 
             # 3. Эмбеддинги
             self._set_window_progress(tr("stage.embed"))
@@ -1108,8 +1122,17 @@ class ImageDedupApp:
                     return
                 
                 # Обновить статистику после кластеризации
-                self.load_stats()
+                await self.load_stats()
             
+            # 5. По умолчанию открываем первый кластер (как в боковой панели).
+            if self.clusters:
+                self.switch_mode("cluster")
+            
+            # 6. Фоновая прегенерация миниатюр (WebP) в БД.
+            # Порядок обхода — строго как кнопки кластеров в боковой панели.
+            # Прогресс виден в заголовке окна, UI не блокируется.
+            self._start_prewarm_thumbnails()
+
             self.show_snackbar(tr("ready"), ft.Colors.GREEN)
             
         except asyncio.CancelledError:
@@ -1126,6 +1149,119 @@ class ImageDedupApp:
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
             self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
             self._reset_window_progress()
+
+    def _start_prewarm_thumbnails(self):
+        """Запускает фоновую прегенерацию миниатюр после скана (идемпотентно).
+
+        Генерация идёт в фоне (asyncio-задача) и не блокирует UI; результат —
+        готовые WebP BLOB в таблице thumbnails. Повторный запуск игнорируется,
+        пока предыдущая задача ещё работает.
+        """
+        if self._prewarm_task is not None and not self._prewarm_task.done():
+            return
+        self._prewarm_task = asyncio.create_task(self._prewarm_thumbnails())
+
+    def _cancel_prewarm(self):
+        """Отменяет фоновую прегенерацию миниатюр (сброс БД / новый скан)."""
+        task = self._prewarm_task
+        self._prewarm_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _prewarm_thumbnails(self):
+        """Фоновая генерация миниатюр для всех файлов кластеров.
+
+        Порядок обхода — в точности как кнопки в боковой панели:
+        sorted(self.clusters.items()) (cluster_id: -2, -1, 0, 1, ...).
+        Кластеры содержат только каноничные (уникальные) файлы, поэтому
+        дубликаты и некластеризованные пути здесь не трогаются — они
+        покрываются ленивой генерацией при открытии галереи.
+
+        Прогресс выводится в заголовок окна через _set_window_progress
+        ('Миниатюры... 120/1048'); после завершения/отмены заголовок
+        возвращается к стандартному (если не запущена другая стадия).
+        """
+        try:
+            # Даём finally у scan-workflow вызвать _reset_window_progress(),
+            # иначе он сотрёт установленный здесь заголовок.
+            await asyncio.sleep(0.25)
+
+            clusters = self.clusters or {}
+            if not clusters:
+                # Например, при отключённой авто-кластеризации — читаем из БД.
+                clusters = await asyncio.to_thread(database.load_clusters) or {}
+
+            order = []
+            seen = set()
+            for cid, members in sorted(clusters.items()):
+                for p in members:
+                    if p not in seen:
+                        seen.add(p)
+                        order.append(p)
+
+            total = len(order)
+            if total == 0:
+                return
+
+            done = 0
+            last_update = time.monotonic()
+            self._prewarm_title_owner = True
+            setattr(self.page.session, "gallery_prewarm_active", True)
+            try:
+                while done < total:
+                    batch = order[done:done + config.PREWARM_CHUNK_SIZE]
+                    await self._generate_thumbnails_parallel(
+                        batch, 150, max_workers=config.PREWARM_THUMB_WORKERS
+                    )
+                    done += len(batch)
+                    now = time.monotonic()
+                    # Троттлинг обновления заголовка, чтобы не спамить page.update()
+                    if now - last_update >= 0.15:
+                        last_update = now
+                        try:
+                            self._set_window_progress(tr("stage.thumbs"), done, total, key="prewarm")
+                        except Exception:
+                            pass
+            finally:
+                setattr(self.page.session, "gallery_prewarm_active", False)
+                # Сбрасываем заголовок на 'Pixel' ТОЛЬКО если он всё ещё принадлежит
+                # прегенерации и не был перезаписан новым скан/стадией.
+                # Сравниваем стабильный ключ, а не tr("stage.thumbs"): при смене
+                # языка перевод меняется, иначе заголовок навсегда остался бы
+                # «Миниатюры...» (см. также _set_window_progress).
+                if self._prewarm_title_owner and self._win_progress_key == "prewarm":
+                    self._prewarm_title_owner = False
+                    try:
+                        self._reset_window_progress()
+                    except Exception:
+                        pass
+
+            # Страховка: если последнее обновление заголовка потерялось (Flet
+            # может схлопнуть быстрые последовательные update), повторно приводим
+            # заголовок к «Pixel». Не выполняется, если запущена новая стадия/скан.
+            if self._win_progress_key == "prewarm":
+                await asyncio.sleep(0.4)
+                if self._win_progress_key == "prewarm":
+                    try:
+                        self._reset_window_progress()
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            if self._prewarm_title_owner and self._win_progress_key == "prewarm":
+                self._prewarm_title_owner = False
+                try:
+                    self._reset_window_progress()
+                except Exception:
+                    pass
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            if self._prewarm_title_owner and self._win_progress_key == "prewarm":
+                self._prewarm_title_owner = False
+                try:
+                    self._reset_window_progress()
+                except Exception:
+                    pass
 
     async def toggle_scan(self, e):
         """Запуск/остановка сканирования"""
@@ -1156,6 +1292,7 @@ class ImageDedupApp:
         else:
             scan_paths = [scan_path]
         
+        self._cancel_prewarm()
         self.scanning = True
         scanner.STOP_REQUESTED = False
         self.start_scan_btn.content = tr("scan.button.stop")
@@ -1241,6 +1378,7 @@ class ImageDedupApp:
             self.start_scan_btn.content = tr("scan.button.start")
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
             self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
+        self._cancel_prewarm()
         self._reset_window_progress()
         
         database.clear_all()
@@ -1577,19 +1715,38 @@ class ImageDedupApp:
         self._cached_path_to_cluster = None
         self._cached_path_to_cluster_scope = None
 
-    def _make_gallery_item(self, path: str, scope: str, gallery: ft.GridView, path_to_cluster: dict = None, thumb_path: str = None):
-        """Создаёт элемент галереи (изображение + бейдж категории для поиска)."""
+    def _make_gallery_item(self, path: str, scope: str, gallery: ft.GridView, path_to_cluster: dict = None, thumb_data: bytes = None, placeholder_mode: bool = False):
+        """Создаёт элемент галереи (изображение + бейдж категории для поиска).
+
+        thumb_data — bytes WebP-миниатюры из БД (см. thumbnail_cache.get_thumbnail);
+        Flet 0.86.5 принимает raw bytes в src, поэтому temp-файлы не нужны.
+
+        placeholder_mode — если True и миниатюры ещё нет, рисует серую плитку
+        вместо ожидания; реальное изображение подставит _fill_page_thumbnails.
+        """
         is_selected = path in self.selected_images
         
         # Используем предварительно сгенерированную миниатюру, либо генерируем на лету
-        if thumb_path is None:
-            thumb_path = thumbnail_cache.get_thumbnail(path, size=150)
-        if thumb_path is not None:
+        if thumb_data is None and not placeholder_mode:
+            thumb_data = thumbnail_cache.get_thumbnail(path, size=150)
+        if thumb_data is not None:
             image = ft.Image(
-                src=thumb_path,
+                src=thumb_data,
                 fit="contain",
                 width=150,
                 height=150,
+                cache_width=150,
+                cache_height=150,
+                gapless_playback=True,
+            )
+        elif placeholder_mode:
+            # Мгновенный показ: серая плитка-плейсхолдер, картинка придёт фоном.
+            # Внутренний Image не нужен — при появлении миниатюры весь элемент
+            # заменяется на реальный (_fill_page_thumbnails).
+            image = ft.Container(
+                width=150,
+                height=150,
+                bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.SURFACE_CONTAINER_HIGHEST),
             )
         else:
             # Fallback на оригинальный путь
@@ -1598,6 +1755,9 @@ class ImageDedupApp:
                 fit="contain",
                 width=150,
                 height=150,
+                cache_width=150,
+                cache_height=150,
+                gapless_playback=True,
             )
         
         # Для поиска показываем номер категории в углу
@@ -1744,28 +1904,65 @@ class ImageDedupApp:
         return max(visible_count * 2, 10)
 
     async def _generate_thumbnails_parallel(self, paths: list, size: int = 150, max_workers: int = 12) -> dict:
-        """Пакетная генерация миниатюр с параллельными потоками.
+        """Пакетное получение миниатюр (BLOB WebP) для списка путей.
 
-        Использует asyncio.Semaphore для ограничения числа одновременных
-        потоков, чтобы не перегружать CPU при генерации.
+        Оптимизация по сравнению с чистой per-path генерацией:
+          1. все os.stat выполняются пакетно и дёшево;
+          2. готовые миниатюры читаются из БД ОДНИМ SQL-запросом;
+          3. в потоках (asyncio.to_thread, ограничено semaphore) генерируются
+             только отсутствующие WebP — с сохранением в БД на будущее.
+
+        Returns:
+            dict {path: bytes | None}
         """
-        semaphore = asyncio.Semaphore(max_workers)
+        if not paths:
+            return {}
 
-        async def generate_one(path):
-            async with semaphore:
-                return path, await asyncio.to_thread(thumbnail_cache.get_thumbnail, path, size)
+        # 1) Актуальные метаданные файлов (бюджетный os.stat в одном потоке).
+        def _collect_meta():
+            meta = {}
+            for p in paths:
+                try:
+                    st = os.stat(p)
+                    meta[p] = (st.st_mtime, st.st_size)
+                except OSError:
+                    meta[p] = None
+            return meta
 
-        results = await asyncio.gather(*[generate_one(p) for p in paths])
-        return dict(results)
+        meta = await asyncio.to_thread(_collect_meta)
+
+        existing = [p for p in paths if meta.get(p) is not None]
+        meta_map = {p: meta[p] for p in existing}
+        result = {p: None for p in paths}
+
+        if not existing:
+            return result
+
+        # 2) Батч-чтение уже готовых миниатюр из БД (1 запрос вместо N).
+        db_thumbs = await asyncio.to_thread(
+            thumbnail_cache.get_thumbnails_for_paths, existing, meta_map
+        )
+        result.update(db_thumbs)
+
+        # 3) Генерация только отсутствующих (в потоках, с сохранением в БД).
+        missing = [p for p in existing if p not in db_thumbs]
+        if missing:
+            semaphore = asyncio.Semaphore(max_workers)
+
+            async def generate_one(path):
+                async with semaphore:
+                    return path, await asyncio.to_thread(thumbnail_cache.get_thumbnail, path, size)
+
+            generated = await asyncio.gather(*[generate_one(p) for p in missing])
+            result.update(dict(generated))
+
+        return result
 
     def _generate_thumbnails_batch(self, paths: list, size: int = 150) -> dict:
-        """Пакетная генерация миниатюр для списка путей.
-        
-        Предназначен для выполнения в фоновом потоке через asyncio.to_thread,
-        чтобы не блокировать UI-поток при создании галереи.
-        
+        """Синхронная пакетная генерация миниатюр (для фонового потока).
+
         Returns:
-            dict {path: thumb_path_or_None}
+            dict {path: bytes | None}
         """
         result = {}
         for path in paths:
@@ -1849,9 +2046,8 @@ class ImageDedupApp:
             page_paths = paths[:page_size]
             offset = 0
         
-        # Генерируем миниатюры параллельно в фоновом режиме, чтобы не блокировать UI
-        thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=12)
-        
+        # Мгновенный показ: строим галерею сразу, без ожидания генерации.
+        # Реальные миниатюры подставятся фоновой задачей _fill_page_thumbnails.
         # Создаём GridView с динамическим числом столбцов под ширину окна
         gallery = ft.GridView(
             expand=True,
@@ -1866,10 +2062,10 @@ class ImageDedupApp:
         # Передаём gallery в обработчик скролла
         gallery.on_scroll = self.create_scroll_handler(paths, scope, page_size, gallery)
         
-        # Добавляем изображения (минимальная работа в UI-потоке — только создание контролов)
+        # Добавляем плейсхолдеры (минимальная работа в UI-потоке — только создание контролов)
         for path in page_paths:
             gallery.controls.append(
-                self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path))
+                self._make_gallery_item(path, scope, gallery, path_to_cluster, placeholder_mode=True)
             )
         
         # Обновляем offset строго на количество реально загруженных путей.
@@ -1882,12 +2078,39 @@ class ImageDedupApp:
         if offset + len(page_paths) < len(paths):
             gallery.controls.append(self._make_loading_indicator())
 
-        # Прогрев кэша миниатюр для следующих страниц галереи.
+        # Фоновая подстановка миниатюр на место плейсхолдеров первого экрана
+        # + прогрев кэша миниатюр для следующих страниц галереи.
         # Важно: вставка всех элементов в GridView запрещена, иначе
         # lazy loading перестаёт быть lazy loading и UI утяжеляется.
+        asyncio.create_task(self._fill_page_thumbnails(page_paths, gallery, scope))
         self._preload_gallery_cache(paths, scope)
 
         return gallery
+
+    async def _fill_page_thumbnails(self, page_paths: list, gallery: ft.GridView, scope: str, max_workers: int = 12):
+        """Подменяет серые плейсхолдеры первого экрана реальными миниатюрами.
+
+        Выполняется в фоне после мгновенного открытия галереи: батч-чтение из
+        БД + генерация только недостающих WebP, затем замена controls по индексам
+        (плейсхолдеры занимают первые len(page_paths) позиций в GridView).
+        """
+        if not page_paths or gallery is None:
+            return
+        try:
+            thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=max_workers)
+            path_to_cluster = self._gallery_path_to_cluster if scope == "search_results" else None
+            replaced = False
+            for i, path in enumerate(page_paths):
+                thumb = thumbs.get(path)
+                if thumb is None:
+                    continue
+                gallery.controls[i] = self._make_gallery_item(path, scope, gallery, path_to_cluster, thumb)
+                replaced = True
+            if replaced:
+                self.page.update()
+        except Exception:
+            import traceback
+            traceback.print_exc()
     
     def create_scroll_handler(self, paths: list, scope: str, page_size: int, gallery: ft.GridView):
         """Создать обработчик скролла для lazy loading (инкрементальная автозагрузка).

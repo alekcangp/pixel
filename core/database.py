@@ -95,6 +95,14 @@ def _init_schema(conn):
             path   TEXT PRIMARY KEY,
             scope  TEXT NOT NULL DEFAULT 'global'
         );
+
+        CREATE TABLE IF NOT EXISTS thumbnails (
+            path  TEXT PRIMARY KEY,
+            mtime REAL NOT NULL DEFAULT 0,
+            size  INTEGER NOT NULL DEFAULT 0,
+            ext   TEXT NOT NULL DEFAULT 'webp',
+            blob  BLOB NOT NULL
+        );
         """
     )
     # Миграция: добавляем колонки, если таблица создана без них (старая БД)
@@ -170,6 +178,93 @@ def get_selected_files_stats(scope="global"):
             (scope,),
         ).fetchone()
         return (row[0], row[1]) if row else (0, 0)
+    finally:
+        conn.close()
+
+
+# ============================================================
+# Thumbnails (миниатюры WebP, BLOB)
+# ============================================================
+
+def save_thumbnail(path, mtime, size, blob_bytes, ext="webp"):
+    """Сохраняет BLOB миниатюры (квадратный WebP) в таблицу thumbnails.
+
+    Ключ — путь; запись валидна только пока совпадают mtime/size исходного
+    файла (иначе миниатюра устарела и при чтении будет перегенерирована).
+    """
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO thumbnails (path, mtime, size, ext, blob) VALUES (?, ?, ?, ?, ?)",
+            (path, float(mtime), int(size), ext, sqlite3.Binary(blob_bytes)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_thumbnail(path, mtime, size):
+    """Возвращает bytes BLOB миниатюры, если она актуальна (mtime/size совпадают), иначе None."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT blob FROM thumbnails WHERE path = ? AND mtime = ? AND size = ?",
+            (path, float(mtime), int(size)),
+        ).fetchone()
+        return bytes(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def load_thumbnails_for_paths(paths, mtime_sizes):
+    """Батч-чтение миниатюр для списка путей (одним SQL-запросом).
+
+    Args:
+        paths: list[str] — пути.
+        mtime_sizes: dict {path: (mtime, size)} — актуальные метаданные файлов;
+            записи, у которых метаданные разошлись (файл изменён), пропускаются.
+
+    Returns:
+        dict {path: bytes}
+    """
+    if not paths:
+        return {}
+    conn = _get_conn()
+    try:
+        placeholders = ",".join("?" for _ in paths)
+        rows = conn.execute(
+            f"SELECT path, mtime, size, blob FROM thumbnails WHERE path IN ({placeholders})",
+            list(paths),
+        ).fetchall()
+        result = {}
+        for r in rows:
+            expected = mtime_sizes.get(r["path"])
+            if expected is None:
+                continue
+            exp_mtime, exp_size = expected
+            if float(exp_mtime) == float(r["mtime"]) and int(exp_size) == int(r["size"]):
+                result[r["path"]] = bytes(r["blob"])
+        return result
+    finally:
+        conn.close()
+
+
+def delete_thumbnail(path):
+    """Удаляет строку миниатюры по пути."""
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM thumbnails WHERE path = ?", (path,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_thumbnails():
+    """Полностью очищает таблицу миниатюр."""
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM thumbnails")
+        conn.commit()
     finally:
         conn.close()
 
@@ -631,7 +726,7 @@ def clear_all():
     """Полностью очищает все таблицы БД."""
     conn = _get_conn()
     try:
-        for table in ["images", "image_hashes", "embeddings", "clusters", "dedup_groups", "failed_files", "selected_files"]:
+        for table in ["images", "image_hashes", "embeddings", "clusters", "dedup_groups", "failed_files", "selected_files", "thumbnails"]:
             conn.execute("DELETE FROM %s" % table)
         conn.commit()
     finally:

@@ -1406,6 +1406,14 @@ class ImageDedupApp:
         self.stat_unique_size.value = "0 " + tr("unit.B")
         self.stat_selected.value = "0"
         self.stat_selected_size.value = "0 " + tr("unit.B")
+
+        # Reset selection-related UI controls to unselected state
+        if hasattr(self, 'select_all_icon_button'):
+            self.select_all_icon_button.icon = ft.Icons.CHECK_BOX_OUTLINE_BLANK
+        if hasattr(self, 'cluster_select_all_icon_button'):
+            self.cluster_select_all_icon_button.icon = ft.Icons.CHECK_BOX_OUTLINE_BLANK
+        if hasattr(self, 'selected_count_text'):
+            self.selected_count_text.value = tr("selected.count", count=0)
         
         self.update_clusters_list()
         

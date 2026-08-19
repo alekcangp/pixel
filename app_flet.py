@@ -404,12 +404,22 @@ class ImageDedupApp:
             self.export_dest_folder.label = tr("export.folder")
             self.export_dest_folder.hint_text = tr("export.default_folder")
 
-        # Заголовок окна: перерисовываем стадию прогресса или возвращаем стандарт
-        if self._win_progress_stage is not None:
+        # Заголовок окна: перерисовываем стадию прогресса на новом языке
+        # или возвращаем стандартный, если прогресс не активен.
+        if self._win_progress_key is not None:
+            stage_labels = {
+                "scan": tr("stage.scan"),
+                "dedup": tr("stage.dedup"),
+                "embed": tr("stage.embed"),
+                "cluster": tr("stage.cluster"),
+                "prewarm": tr("stage.thumbs"),
+                "export": tr("stage.export"),
+            }
+            label = stage_labels.get(self._win_progress_key, self._win_progress_stage or tr("app.title"))
             if self._win_progress_total and self._win_progress_total > 0:
-                self.page.title = f"{self._win_progress_stage}... {self._win_progress_current}/{self._win_progress_total}"
+                self.page.title = f"{label}... {self._win_progress_current}/{self._win_progress_total}"
             else:
-                self.page.title = f"{self._win_progress_stage}..."
+                self.page.title = f"{label}..."
         else:
             self.page.title = tr("app.title")
 
@@ -962,7 +972,7 @@ class ImageDedupApp:
         (например 'Сканирование... 3/100'). Длинное сообщение (message) в UI
         больше не выводится — только стадия и счётчик.
 
-        page.update() в Flet НЕ потокобезопасен — на Windows вызов из чужого потока
+page.update() в Flet НЕ потокобезопасен — на Windows вызов из чужого потока
         даёт WinError 1. Используем page.run_task() для переноса обновления
         в главный (UI) поток.
         """
@@ -971,18 +981,28 @@ class ImageDedupApp:
             return
         self._last_progress_update = now
         try:
-            labels = {
+            stage_keys = {
+                "scan": "scan",
+                "dedup": "dedup",
+                "embed": "embed",
+                "cluster": "cluster",
+            }
+            stage_labels = {
                 "scan": tr("stage.scan"),
                 "dedup": tr("stage.dedup"),
                 "embed": tr("stage.embed"),
                 "cluster": tr("stage.cluster"),
             }
-            label = labels.get(stage, stage)
+            key = stage_keys.get(stage, stage)
+            label = stage_labels.get(stage, stage)
 
             async def update_ui():
                 if not self.scanning:
                     return
-                self._set_window_progress(label, current, total)
+                # Only update if this stage still owns the window progress
+                if self._win_progress_key != key:
+                    return
+                self._set_window_progress(label, current, total, key=key)
 
             self.page.run_task(update_ui)
         except Exception as ex:
@@ -1046,7 +1066,7 @@ class ImageDedupApp:
             for i, path in enumerate(scan_paths):
                 if scanner.STOP_REQUESTED:
                     break
-                self._set_window_progress(tr("stage.scan"), i + 1, len(scan_paths))
+                self._set_window_progress(tr("stage.scan"), i + 1, len(scan_paths), key="scan")
                 
                 task = asyncio.create_task(asyncio.to_thread(
                     scanner.run,
@@ -1072,7 +1092,7 @@ class ImageDedupApp:
                 return
             
             # 2. Дедупликация
-            self._set_window_progress(tr("stage.dedup"))
+            self._set_window_progress(tr("stage.dedup"), key="dedup")
             
             task = asyncio.create_task(asyncio.to_thread(dedup.run, incremental=True, progress_callback=self._progress_callback))
             self._scan_worker_tasks.append(task)
@@ -1089,7 +1109,7 @@ class ImageDedupApp:
             await self.load_stats()
 
             # 3. Эмбеддинги
-            self._set_window_progress(tr("stage.embed"))
+            self._set_window_progress(tr("stage.embed"), key="embed")
             
             task = asyncio.create_task(asyncio.to_thread(embedder.run, incremental=True, progress_callback=self._progress_callback))
             self._scan_worker_tasks.append(task)
@@ -1108,7 +1128,7 @@ class ImageDedupApp:
             
             # 4. Кластеризация (только если включено в конфиге)
             if config.AUTO_CLUSTER_AFTER_SCAN:
-                self._set_window_progress(tr("stage.cluster"))
+                self._set_window_progress(tr("stage.cluster"), key="cluster")
                 
                 task = asyncio.create_task(asyncio.to_thread(clustererhdb.run, progress_callback=self._progress_callback))
                 self._scan_worker_tasks.append(task)
@@ -1148,7 +1168,8 @@ class ImageDedupApp:
             self.start_scan_btn.content = tr("scan.button.start")
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
             self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
-            self._reset_window_progress()
+            if not (self._prewarm_task is not None and not self._prewarm_task.done()):
+                self._reset_window_progress()
 
     def _start_prewarm_thumbnails(self):
         """Запускает фоновую прегенерацию миниатюр после скана (идемпотентно).
@@ -1201,12 +1222,26 @@ class ImageDedupApp:
 
             total = len(order)
             if total == 0:
+                # Нечего прегенерировать — заголовок всё ещё принадлежит
+                # предыдущей стадии (напр. «Кластеризация...»). Возвращаем
+                # стандартный заголовок, иначе он навсегда останется висеть.
+                try:
+                    self._reset_window_progress()
+                except Exception:
+                    pass
                 return
 
             done = 0
             last_update = time.monotonic()
             self._prewarm_title_owner = True
             setattr(self.page.session, "gallery_prewarm_active", True)
+            # Сразу занимаем заголовок, не дожидаясь throttle: иначе при быстрой
+            # генерации _win_progress_key не установится и finally не сбросит
+            # заголовок, оставиvis прошлую стадию (напр. «Кластеризация...»).
+            try:
+                self._set_window_progress(tr("stage.thumbs"), 0, total, key="prewarm")
+            except Exception:
+                pass
             try:
                 while done < total:
                     batch = order[done:done + config.PREWARM_CHUNK_SIZE]
@@ -1293,6 +1328,7 @@ class ImageDedupApp:
             scan_paths = [scan_path]
         
         self._cancel_prewarm()
+        self._reset_window_progress()
         self.scanning = True
         scanner.STOP_REQUESTED = False
         self.start_scan_btn.content = tr("scan.button.stop")
@@ -1301,7 +1337,7 @@ class ImageDedupApp:
         self.page.update()
         
         # Показываем прогресс в заголовке окна
-        self._set_window_progress(tr("stage.scan"))
+        self._set_window_progress(tr("stage.scan"), key="scan")
         
         self.scan_task = asyncio.create_task(self._run_scan_workflow(scan_paths))
     

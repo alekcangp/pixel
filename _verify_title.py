@@ -35,10 +35,25 @@ import app_flet as m  # noqa: E402
 from i18n import set_language  # noqa: E402
 
 
+class SessionObject:
+    """Объект-заглушка для session, поддерживающий setattr/getattr."""
+    def __init__(self):
+        self._data = {}
+    
+    def __getattr__(self, name):
+        return self._data.get(name, None)
+    
+    def __setattr__(self, name, value):
+        if name == "_data":
+            super().__setattr__(name, value)
+        else:
+            self._data[name] = value
+
+
 class FakePage:
     def __init__(self):
         self.title = None
-        self.session = {}
+        self.session = SessionObject()
         self.updates = 0
 
     def update(self):

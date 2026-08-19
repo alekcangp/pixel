@@ -729,6 +729,7 @@ def clear_all():
         for table in ["images", "image_hashes", "embeddings", "clusters", "dedup_groups", "failed_files", "selected_files", "thumbnails"]:
             conn.execute("DELETE FROM %s" % table)
         conn.commit()
+        conn.execute("VACUUM")
     finally:
         conn.close()
 

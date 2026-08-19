@@ -368,6 +368,8 @@ class ImageDedupApp:
             self.scan_path_input.hint_text = tr("scan.path.hint")
             if is_all_disks(self.scan_path_input.value):
                 self.scan_path_input.value = tr("scan.all_disks")
+            self.search_input.value = ""
+            self.export_dest_folder.value = ""
         if hasattr(self, "browse_scan_path_button"):
             self.browse_scan_path_button.tooltip = tr("scan.browse")
         if hasattr(self, "browse_export_button"):
@@ -1433,6 +1435,10 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         self._invalidate_cluster_cache()
         
         self.scan_path_input.value = tr("scan.all_disks")
+        self.search_input.value = ""
+        self.export_dest_folder.value = tr("export.default_folder")
+        self._export_dest_folder_path = None
+        setattr(self.page.session, "export_dest_folder", None)
         
         self.stat_total.value = "0"
         self.stat_total_size.value = "0 " + tr("unit.B")

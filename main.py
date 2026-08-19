@@ -140,7 +140,7 @@ def main():
                          help="Полный пересчёт (вместо инкрементального)")
     p_dedup.set_defaults(func=cmd_dedup)
 
-    p_embed = sub.add_parser("embed", help="Эмбеддинги SigLIP2 (по умолчанию инкрементально)")
+    p_embed = sub.add_parser("embed", help="Эмбеддинги SigLIP (по умолчанию инкрементально)")
     p_embed.add_argument("--full", action="store_true",
                          help="Полный пересчёт (вместо инкрементального)")
     p_embed.set_defaults(func=cmd_embed)

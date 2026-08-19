@@ -1,4 +1,4 @@
-# Image Deduplication
+# Pixel
 
 **Local-first image deduplication, clustering, and semantic search for your entire computer.**
 
@@ -142,9 +142,11 @@ For semantic search, embeddings, and the desktop UI, PyTorch and the Hugging Fac
 
 ## Installation
 
+For a quick setup, just download and run the installer file for your operating system. The installer will create the Python 3.12 virtual environment, install dependencies, download the model, and start the application automatically.
+
 ### macOS
 
-The repository includes an automatic installer for macOS:
+Run:
 
 ```bash
 chmod +x install_and_run.command

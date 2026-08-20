@@ -46,8 +46,6 @@ class ImageDedupApp:
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.window.width = 1150
         self.page.window.height = 700
-        #self.page.window.visible = False
-        #self.page.update()
 
         # 2. Показываем окно только после готовности: ждём клиента,
         #    центрируем и делаем видимым. (page.window.center() — async,
@@ -136,9 +134,7 @@ class ImageDedupApp:
         # её на каждом скролле в load_more — итерация по всем кластерам дорогая).
         self._gallery_path_to_cluster = None
         
-        # Flet FilePicker removed - using tkinter fallback for folder selection
-        # (Flet 0.86.5 FilePicker has runtime issues on desktop)
-        
+
         # Создаём UI
         self.create_layout()
         
@@ -436,7 +432,7 @@ class ImageDedupApp:
         self.stat_duplicates_size = ft.Text("0 " + tr("unit.B"), size=11, color=self._WARM_ON_SURFACE_VARIANT)
         self.stat_unique = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="#81C784")
         self.stat_unique_size = ft.Text("0 " + tr("unit.B"), size=11, color=self._WARM_ON_SURFACE_VARIANT)
-        self.stat_selected = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=self._WARM_PRIMARY)
+        self.stat_selected = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="#64B5F6")
         self.stat_selected_size = ft.Text("0 " + tr("unit.B"), size=11, color=self._WARM_ON_SURFACE_VARIANT)
         
         self.stats_title_text = ft.Text(tr("stat.title"), size=16, weight=ft.FontWeight.BOLD)
@@ -515,11 +511,6 @@ class ImageDedupApp:
         for i, (cluster_id, members) in enumerate(clusters_list):
             col_idx = i % 3
             columns[col_idx].append((cluster_id, members))
-        columns = [[] for _ in range(3)]
-        
-        for i, (cluster_id, members) in enumerate(clusters_list):
-            col_idx = i % 3
-            columns[col_idx].append((cluster_id, members))
         
         # Создаём строки с кнопками
         max_rows = max(len(col) for col in columns)
@@ -535,8 +526,8 @@ class ImageDedupApp:
                         bgcolor = self._WARM_PRIMARY
                         color = self._WARM_ON_PRIMARY
                     elif has_selected:
-                        bgcolor = self._WARM_PRIMARY_CONTAINER
-                        color = self._WARM_ON_PRIMARY_CONTAINER
+                        bgcolor = "#5D4037"
+                        color = "#EFEBE9"
                     else:
                         bgcolor = self._WARM_SURFACE
                         color = self._WARM_ON_SURFACE
@@ -1856,7 +1847,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             content=ft.Container(
                 content=content,
                 border_radius=8,
-                border=ft.Border.all(3, self._WARM_PRIMARY) if is_selected else None,
+                border=ft.Border.all(4, "#64B5F6") if is_selected else None,
                 data=path,  # <-- важно: храним оригинальный путь для поиска контейнера
             ),
             on_tap_down=on_tap_down,
@@ -2355,7 +2346,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 container = control.content if isinstance(control, ft.GestureDetector) else control
                 if isinstance(container, ft.Container) and container.data == path:
                     is_selected = path in self.selected_images
-                    container.border = ft.Border.all(3, self._WARM_PRIMARY) if is_selected else None
+                    container.border = ft.Border.all(4, "#64B5F6") if is_selected else None
                     updated = True
                     break
         

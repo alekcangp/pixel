@@ -85,6 +85,11 @@ if [ -z "$CMD" ]; then
     fi
 fi
 
+RUN_AFTER_INSTALL=0
+if [ "$CMD" = "install" ] && [ -z "${1:-}" ]; then
+    RUN_AFTER_INSTALL=1
+fi
+
 case "$CMD" in
     install)
         log "Setting up virtual environment..."
@@ -106,7 +111,13 @@ AutoModel.from_pretrained(m)
 print("Model loaded:", m)
 PY
         log "Setup complete."
-        read -p "Press any key to exit..."
+        if [ "$RUN_AFTER_INSTALL" -eq 1 ]; then
+            log "Launching Pixel..."
+            ./.venv/bin/python main.py ui-flet
+            read -p "Press any key to exit..."
+        else
+            read -p "Press any key to exit..."
+        fi
         ;;
     run)
         if [ ! -x ".venv/bin/python3" ]; then

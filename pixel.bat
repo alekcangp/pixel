@@ -11,6 +11,9 @@ rem ============================================================
 setlocal
 cd /d "%~dp0"
 
+set "SHOULD_RUN_AFTER_INSTALL=0"
+if "%~1"=="" set "SHOULD_RUN_AFTER_INSTALL=1"
+
 rem Detect working Python executable.
 rem On Windows 10/11 the App Execution Alias may make `where python.exe`
 rem succeed even when Python is not actually installed; verify with --version.
@@ -83,6 +86,7 @@ echo [Pixel] Downloading SigLIP model (first run)...
 if errorlevel 1 goto FAIL
 
 echo [Pixel] Setup complete.
+if %SHOULD_RUN_AFTER_INSTALL%==1 goto RUN
 pause
 goto :EOF
 

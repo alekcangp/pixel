@@ -1,12 +1,12 @@
 @echo off
 rem ============================================================
-rem  Pixel - единый скрипт установки/запуска/удаления (Windows)
+rem  Pixel - unified install/run/uninstall script (Windows)
 rem
-rem  Использование:
-rem    pixel.bat            установить (если нужно) + запустить
-rem    pixel.bat install    только установка (venv + зависимости + модель)
-rem    pixel.bat run        только запуск
-rem    pixel.bat uninstall  удаление (venv, БД, кэш модели)
+rem  Usage:
+rem    pixel.bat            install (if needed) + run
+rem    pixel.bat install    install only (venv + deps + model)
+rem    pixel.bat run        run only
+rem    pixel.bat uninstall  uninstall (venv, DB, model cache)
 rem ============================================================
 setlocal
 cd /d "%~dp0"
@@ -15,50 +15,54 @@ if /i "%~1"=="install"   goto INSTALL
 if /i "%~1"=="run"       goto RUN
 if /i "%~1"=="uninstall" goto UNINSTALL
 
-rem Без аргумента: установка (если venv ещё нет) + запуск
+rem No argument: install (if venv missing) + run
 if not exist ".venv\Scripts\python.exe" goto INSTALL
 goto RUN
 
 :INSTALL
-echo [Pixel] Настраиваю виртуальное окружение...
+echo [Pixel] Setting up virtual environment...
 if not exist ".venv\Scripts\python.exe" (
     python -m venv .venv
     if errorlevel 1 goto FAIL
 )
 call ".venv\Scripts\activate.bat"
 
-echo [Pixel] Устанавливаю зависимости...
+echo [Pixel] Installing dependencies...
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 if errorlevel 1 goto FAIL
 
-echo [Pixel] Скачиваю модель SigLIP (первый запуск)...
-python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Модель загружена', m)"
+echo [Pixel] Downloading SigLIP model (first run)...
+python -c "from transformers import AutoProcessor, AutoModel; m='google/siglip-base-patch16-224'; AutoProcessor.from_pretrained(m); AutoModel.from_pretrained(m); print('Model loaded:', m)"
 if errorlevel 1 goto FAIL
 
-echo [Pixel] Установка завершена.
+echo [Pixel] Setup complete.
+pause
 goto :EOF
 
 :RUN
 if not exist ".venv\Scripts\python.exe" (
-    echo [Pixel] Окружение не найдено. Сначала запустите: pixel.bat install
+    echo [Pixel] Environment not found. Run: pixel.bat install
+    pause
     goto FAIL
 )
-echo [Pixel] Запускаю Pixel...
+echo [Pixel] Launching Pixel...
 ".venv\Scripts\python.exe" main.py ui-flet
 goto :EOF
 
 :UNINSTALL
-echo [Pixel] Удаляю виртуальное окружение...
+echo [Pixel] Removing virtual environment...
 if exist ".venv" rmdir /s /q ".venv"
-echo [Pixel] Удаляю базу данных storage\*.db...
+echo [Pixel] Removing database storage\*.db...
 if exist "storage" del /f /q "storage\*.db" "storage\*.db-journal" "storage\*.db-wal" "storage\*.db-shm" 2>nul
-echo [Pixel] Удаляю кэш модели Hugging Face...
+echo [Pixel] Removing HuggingFace model cache...
 if exist "%USERPROFILE%\.cache\huggingface\hub\models--google--siglip-base-patch16-224" rmdir /s /q "%USERPROFILE%\.cache\huggingface\hub\models--google--siglip-base-patch16-224"
 if exist "%USERPROFILE%\.cache\torch\transformers\google--siglip-base-patch16-224" rmdir /s /q "%USERPROFILE%\.cache\torch\transformers\google--siglip-base-patch16-224"
-echo [Pixel] Удаление завершено.
+echo [Pixel] Uninstall complete.
+pause
 goto :EOF
 
 :FAIL
-echo [Pixel] Ошибка. Смотрите вывод выше.
+echo [Pixel] Error. See output above.
+pause
 exit /b 1

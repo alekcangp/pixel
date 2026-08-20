@@ -11,13 +11,18 @@ rem ============================================================
 setlocal
 cd /d "%~dp0"
 
-rem Detect available Python executable
+rem Detect working Python executable.
+rem On Windows 10/11 the App Execution Alias may make `where python.exe`
+rem succeed even when Python is not actually installed; verify with --version.
 set "PYTHON_CMD="
 for %%p in (python.exe python3.exe py.exe) do (
     where "%%p" >nul 2>&1
     if not errorlevel 1 (
-        set "PYTHON_CMD=%%p"
-        goto :PYTHON_FOUND
+        "%%p" --version >nul 2>&1
+        if not errorlevel 1 (
+            set "PYTHON_CMD=%%p"
+            goto :PYTHON_FOUND
+        )
     )
 )
 :PYTHON_FOUND
@@ -31,6 +36,24 @@ if "%PYTHON_CMD%"=="" (
         exit /b 1
     )
     echo [Pixel] Python installed successfully.
+    rem Re-detect after install
+    set "PYTHON_CMD="
+    for %%p in (python.exe python3.exe py.exe) do (
+        where "%%p" >nul 2>&1
+        if not errorlevel 1 (
+            "%%p" --version >nul 2>&1
+            if not errorlevel 1 (
+                set "PYTHON_CMD=%%p"
+                goto :PYTHON_FOUND
+            )
+        )
+    )
+    :PYTHON_FOUND
+    if "%PYTHON_CMD%"=="" (
+        echo [Pixel] Python installed, but not yet in PATH. Restart the terminal and run pixel.bat again.
+        pause
+        exit /b 1
+    )
 )
 
 echo [Pixel] Using Python: %PYTHON_CMD%
@@ -103,21 +126,6 @@ echo [Pixel] Installing Python 3.12.9 silently...
 "%PYTHON_INSTALLER%" /quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 Include_test=0
 if errorlevel 1 (
     echo [Pixel] Python installer returned an error.
-    exit /b 1
-)
-rem Refresh PATH for this session
-set "PYTHON_CMD="
-for %%p in (python.exe python3.exe py.exe) do (
-    where "%%p" >nul 2>&1
-    if not errorlevel 1 (
-        set "PYTHON_CMD=%%p"
-        goto :PYTHON_FOUND
-    )
-)
-:PYTHON_FOUND
-if "%PYTHON_CMD%"=="" (
-    echo [Pixel] Python installed, but not yet in PATH. Restart the terminal and run pixel.bat again.
-    pause
     exit /b 1
 )
 exit /b 0

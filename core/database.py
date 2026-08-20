@@ -754,6 +754,23 @@ def clear_all():
         conn.close()
 
 
+def delete_images_by_paths(paths):
+    """Удаляет изображения и связанные миниатюры по списку путей."""
+    if not paths:
+        return
+    conn = _get_conn()
+    try:
+        step = 900
+        for i in range(0, len(paths), step):
+            chunk = paths[i:i + step]
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM thumbnails WHERE path IN ({placeholders})", chunk)
+            conn.execute(f"DELETE FROM images WHERE path IN ({placeholders})", chunk)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def load_db_stats():
     """Возвращает статистику: total, duplicates, unique, clusters, garbage, total_size."""
     conn = _get_conn()

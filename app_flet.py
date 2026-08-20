@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
 from PIL import Image as PILImage
+import concurrent.futures
 
 import config
 
@@ -34,6 +35,41 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.1f} {tr('unit.MB')}"
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} {tr('unit.GB')}"
+
+
+def _dedupe_scan_paths(paths):
+    """Возвращает список корневых путей без дублей и пересечений.
+
+    Убирает пути, которые являются дубликатами или вложены в другой уже
+    включённый путь (например, на macOS корень '/' уже проходит по всем
+    точкам монтирования /Volumes/*, поэтому их не нужно сканировать и
+    считать повторно). Это исключает двойной учёт одного и того же диска
+    в общем счётчике прогресса 'Сканирование... X/Y'.
+    """
+    tmp = []
+    for p in paths:
+        try:
+            n = os.path.normpath(p)
+            if sys.platform == "win32":
+                n = os.path.normcase(n)
+        except Exception:
+            n = p
+        if not n:
+            continue
+        tmp.append((p, n))
+
+    keep = []
+    for p, n in tmp:
+        # Новый путь — наследник уже сохранённого корня (уже покрыт) → пропускаем
+        if any(n == kn or n.startswith(kn.rstrip(os.sep) + os.sep) for _, kn in keep):
+            continue
+        # Новый путь шире сохранённого → выкидываем сохранённых наследников
+        keep = [(kp, kn) for kp, kn in keep
+                if not (kn == n or kn.startswith(n.rstrip(os.sep) + os.sep))]
+        keep.append((p, n))
+
+    return [p for p, _ in keep]
+
 
 
 class ImageDedupApp:
@@ -88,6 +124,7 @@ class ImageDedupApp:
         self.export_task = None
         self._export_stop_requested = False
         self._current_lang = LANG
+        self._scan_phase = "idle"
 
         # Текущий режим: scan / search / export / cluster
         self.current_mode = "scan"
@@ -279,8 +316,11 @@ class ImageDedupApp:
     
 
 
-    def _set_window_progress(self, label: str, current: int = 0, total: int = 0, key: str = None):
-        """Показывает стадию и счётчик в заголовке окна, напр. 'Сканирование... 3/100'.
+    def _set_window_progress(self, label: str, current: int = 0, total: int = 0, key: str = None, disk_current: int = None, disk_total: int = None):
+        """Показывает стадию и счётчик в заголовке окна.
+
+        Если заданы disk_current/disk_total, отображает двойной прогресс:
+        'Сканирование... 2/3 (500/1200)'.
 
         key — стабильный идентификатор владельца заголовка (напр. "prewarm",
         "scan", "export"). Если не задан, используется сам label; для проверки
@@ -291,7 +331,12 @@ class ImageDedupApp:
         self._win_progress_current = current
         self._win_progress_total = total
         self._win_progress_key = key if key is not None else label
-        if total and total > 0:
+        if disk_current is not None and disk_total is not None and disk_total > 0:
+            if total and total > 0:
+                self.page.title = f"{label}... {disk_current}/{disk_total} ({current}/{total})"
+            else:
+                self.page.title = f"{label}... {disk_current}/{disk_total}"
+        elif total and total > 0:
             self.page.title = f"{label}... {current}/{total}"
         else:
             self.page.title = f"{label}..."
@@ -847,21 +892,32 @@ class ImageDedupApp:
             stats = await asyncio.to_thread(database.load_db_stats)
             
             self.stat_total.value = str(stats["total"])
-            self.stat_duplicates.value = str(stats["duplicates"])
-            self.stat_unique.value = str(stats["unique"])
             
             # Обновляем размеры
             total_size = stats.get("total_size", 0)
             self.stat_total_size.value = _format_size(total_size)
             
-            # Размер дубликатов и уникальных — вычисляем из БД
-            try:
-                dup_size = await asyncio.to_thread(database.get_duplicates_size)
-                self.stat_duplicates_size.value = _format_size(dup_size)
-                self.stat_unique_size.value = _format_size(max(total_size - dup_size, 0))
-            except Exception:
-                self.stat_duplicates_size.value = "—"
-                self.stat_unique_size.value = "—"
+            # Дедупликация для только что найденных файлов ещё не выполнена:
+            # до её завершения строки в dedup_groups отсутствуют, поэтому
+            # из БД получили бы уникальные == общему числу файлов, что неверно.
+            # Показываем 0 (как было по умолчанию), а не обманчивое N.
+            dedup_pending = getattr(self, '_scan_phase', 'idle') in ("scan", "dedup")
+            if dedup_pending:
+                self.stat_duplicates.value = "0"
+                self.stat_unique.value = "0"
+                self.stat_duplicates_size.value = "0 " + tr("unit.B")
+                self.stat_unique_size.value = "0 " + tr("unit.B")
+            else:
+                self.stat_duplicates.value = str(stats["duplicates"])
+                self.stat_unique.value = str(stats["unique"])
+                # Размер дубликатов и уникальных — вычисляем из БД
+                try:
+                    dup_size = await asyncio.to_thread(database.get_duplicates_size)
+                    self.stat_duplicates_size.value = _format_size(dup_size)
+                    self.stat_unique_size.value = _format_size(max(total_size - dup_size, 0))
+                except Exception:
+                    self.stat_duplicates_size.value = "—"
+                    self.stat_unique_size.value = "—"
             
             # Обновляем статистику выбранных файлов (мгновенно из БД,
             # без обращения к файловой системе — файлы могут быть на внешнем диске)
@@ -1008,10 +1064,24 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         """
         if sys.platform == "win32":
             disks = []
-            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-                path = f"{letter}:\\"
-                if os.path.exists(path):
-                    disks.append(path)
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = {}
+                    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                        path = f"{letter}:\\"
+                        futures[path] = executor.submit(os.path.exists, path)
+                    
+                    for path, future in futures.items():
+                        try:
+                            if future.result(timeout=2):
+                                disks.append(path)
+                        except Exception:
+                            continue
+            except Exception:
+                for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                    path = f"{letter}:\\"
+                    if os.path.exists(path):
+                        disks.append(path)
             return disks
         else:
             # macOS/Linux: / и /Volumes/* (macOS дополнительно монтирует
@@ -1053,17 +1123,65 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
     async def _run_scan_workflow(self, scan_paths):
         try:
             files = []
+            total_disks = len(scan_paths)
+            global_total = getattr(self, '_global_scan_total', 0)
+            per_disk_totals = getattr(self, '_per_disk_totals', {})
+            # Дубли в БД не прибавляем: incremental_scan пересканирует все файлы
+            # на диске, поэтому счётчик прогресса должен идти от 0 до количества
+            # файлов на диске (иначе уже проиндексированные файлы посчитаются дважды).
+            cumulative_base = 0
+            
             for i, path in enumerate(scan_paths):
                 if scanner.STOP_REQUESTED:
                     break
-                self._set_window_progress(tr("stage.scan"), i + 1, len(scan_paths), key="scan")
+                disk_idx = i + 1
+                disk_total = per_disk_totals.get(path, 0)
+                
+                if total_disks == 1:
+                    def _single_disk_progress(stage, current, total, message):
+                        if stage == "scan":
+                            now = time.monotonic()
+                            last = getattr(self, '_last_progress_update', 0)
+                            if now - last < 0.05:
+                                return
+                            self._last_progress_update = now
+                            async def _update():
+                                if not self.scanning:
+                                    return
+                                if self._win_progress_key != "scan":
+                                    return
+                                self._set_window_progress(tr("stage.scan"), current, total, key="scan")
+                            self.page.run_task(_update)
+                        else:
+                            self._progress_callback(stage, current, total, message)
+                    disk_progress_cb = _single_disk_progress
+                else:
+                    def _disk_progress(stage, current, total, message, _cumulative_base=cumulative_base, _disk_total=disk_total, _global_total=global_total, _disk_idx=disk_idx, _total_disks=total_disks):
+                        if stage == "scan":
+                            now = time.monotonic()
+                            last = getattr(self, '_last_disk_progress_update', 0)
+                            if now - last < 0.15:
+                                return
+                            self._last_disk_progress_update = now
+                            async def _update_disk_progress():
+                                if not self.scanning:
+                                    return
+                                if self._win_progress_key != "scan":
+                                    return
+                                self._set_window_progress(tr("stage.scan"), _cumulative_base + current, _global_total, key="scan", disk_current=_disk_idx, disk_total=_total_disks)
+                            self.page.run_task(_update_disk_progress)
+                        else:
+                            self._progress_callback(stage, current, total, message)
+                    disk_progress_cb = _disk_progress
+                
+                self._set_window_progress(tr("stage.scan"), cumulative_base, global_total, key="scan", disk_current=disk_idx, disk_total=total_disks)
                 
                 task = asyncio.create_task(asyncio.to_thread(
                     scanner.run,
                     path,
                     None, None, None,
                     incremental=True,
-                    progress_callback=self._progress_callback,
+                    progress_callback=disk_progress_cb,
                 ))
                 self._scan_worker_tasks.append(task)
                 try:
@@ -1073,6 +1191,9 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                         self._scan_worker_tasks.remove(task)
                 if result:
                     files.extend(result)
+                    await self.load_stats()
+                
+                cumulative_base += disk_total
             
             if scanner.STOP_REQUESTED:
                 return
@@ -1080,6 +1201,8 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             if not files:
                 self.show_snackbar(tr("scan.no_files"), "#FFB74D")
                 return
+            
+            self._scan_phase = "dedup"
             
             # 2. Дедупликация
             self._set_window_progress(tr("stage.dedup"), key="dedup")
@@ -1095,9 +1218,14 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             if scanner.STOP_REQUESTED:
                 return
 
+            # Дедупликация завершена (группы сохранены в БД) — переводим фазу
+            # ДО load_stats, чтобы статистика показала реальные значения
+            # дубликатов/уникальных, а не нулевую «до дедупликации».
+            self._scan_phase = "embed"
+
             # Обновляем статистику после дедупликации (дубликаты уже сохранены в БД)
             await self.load_stats()
-
+            
             # 3. Эмбеддинги
             self._set_window_progress(tr("stage.embed"), key="embed")
             
@@ -1116,6 +1244,8 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             if scanner.STOP_REQUESTED:
                 return
             
+            self._scan_phase = "cluster"
+            
             # 4. Кластеризация (только если включено в конфиге)
             if config.AUTO_CLUSTER_AFTER_SCAN:
                 self._set_window_progress(tr("stage.cluster"), key="cluster")
@@ -1133,6 +1263,8 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 
                 # Обновить статистику после кластеризации
                 await self.load_stats()
+            
+            self._scan_phase = "done"
             
             # 5. По умолчанию открываем первый кластер (как в боковой панели).
             if self.clusters:
@@ -1153,6 +1285,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             if self.scanning:
                 self.show_snackbar(tr("error", error=e), self._WARM_ERROR)
         finally:
+            self._scan_phase = "idle"
             print("Процесс завершён.")
             self.scanning = False
             self.start_scan_btn.content = tr("scan.button.start")
@@ -1318,11 +1451,40 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             return
         else:
             scan_paths = [scan_path]
+
+        # Убираем дубликаты и пересекающиеся пути (например, '/' + '/Volumes/*'
+        # на macOS), чтобы один и тот же диск не сканировался и не считался дважды.
+        scan_paths = _dedupe_scan_paths(scan_paths)
         
         self._cancel_prewarm()
         self._reset_window_progress()
         self.scanning = True
         scanner.STOP_REQUESTED = False
+        self._scan_phase = "scan"
+
+        if len(scan_paths) > 1:
+            self._set_window_progress(tr("progress.prepare"), key="scan")
+            def _pre_count():
+                totals = {}
+                for p in scan_paths:
+                    try:
+                        totals[p] = scanner._count_matching_files(p)
+                    except Exception:
+                        totals[p] = 0
+                return totals
+            self._per_disk_totals = await asyncio.to_thread(_pre_count)
+            self._global_scan_total = sum(self._per_disk_totals.values())
+        else:
+            self._per_disk_totals = {}
+            def _pre_count_single():
+                try:
+                    return scanner._count_matching_files(scan_paths[0])
+                except Exception:
+                    return 0
+            disk_total = await asyncio.to_thread(_pre_count_single)
+            self._global_scan_total = disk_total
+            self._per_disk_totals = {scan_paths[0]: disk_total}
+
         self.start_scan_btn.content = tr("scan.button.stop")
         self.start_scan_btn.icon = ft.Icons.STOP
         self.start_scan_btn.bgcolor = self._WARM_ERROR
@@ -1453,6 +1615,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         
         self.tab_content.content = ft.Text(tr("categories.empty"))
         
+        self.switch_mode("scan")
         self.page.update()
         self.show_snackbar(tr("reset.done"), "#81C784")
 
@@ -1515,8 +1678,9 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         self.tab_content.content = content
         self.page.update()
         # Восстанавливаем позицию скролла при смене вкладки на экспорт
-        page_size = self._calc_grid_size(len(selected_paths))
-        self._restore_gallery_scroll(gallery, "export", selected_paths, page_size)
+        if selected_paths:
+            page_size = self._calc_grid_size(len(selected_paths))
+            self._restore_gallery_scroll(gallery, "export", selected_paths, page_size)
     async def _run_export(self):
         """Экспорт выбранных файлов в одну папку без разделения по категориям"""
         selected_paths = sorted(self.selected_images)

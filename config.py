@@ -15,7 +15,7 @@ DEFAULT_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"]
 
 # Minimum file size in bytes.
 # Files smaller than this value are skipped.
-MIN_FILE_SIZE = 20 * 1024  # 20 KiB
+MIN_FILE_SIZE = 30 * 1024  # 20 KiB
 
 # Directories excluded by default.
 # These are typically system, cache, development, or dependency directories.

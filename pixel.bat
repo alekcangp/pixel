@@ -50,7 +50,6 @@ if "%PYTHON_CMD%"=="" (
             )
         )
     )
-    :PYTHON_FOUND
     if "%PYTHON_CMD%"=="" (
         echo [Pixel] Python installed, but not yet in PATH. Restart the terminal and run pixel.bat again.
         pause

@@ -142,16 +142,14 @@ def incremental_scan(path, extensions=None, exclude_dirs=None, min_size=None, pr
         if old is None:
             new_files.append(f)
         else:
-            # Проверяем, изменился ли файл (по размеру или mtime)
             if (f["size"] != old["size"] or 
                 f["mtime"] != old["mtime"]):
                 changed_files.append(f)
 
-    # Удалённые — только файлы, принадлежащие текущему источнику
-    # (файлы из других источников не удаляем)
     removed_paths = []
+    source_norm = os.path.normcase(path) if sys.platform == "win32" else path
     for p in existing_paths - all_paths:
-        if existing[p].get("source", "") == path:
+        if os.path.normcase(existing[p].get("source", "")) == source_norm:
             removed_paths.append(p)
 
     return new_files, changed_files, removed_paths, all_files

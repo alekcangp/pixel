@@ -809,19 +809,15 @@ def load_db_stats():
     conn = _get_conn()
     try:
         total = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-        # Считаем дубликаты только для файлов, которые реально есть в images
-        # (иначе осиротевшие записи в dedup_groups искажают статистику)
         duplicates = conn.execute(
             "SELECT COUNT(*) FROM dedup_groups g JOIN images i ON g.image_id = i.id WHERE g.is_canonical = 0"
         ).fetchone()[0]
-        # Исключаем шум (-1) и визуальный мусор (-2) из подсчёта кластеров
         clusters = conn.execute(
             "SELECT COUNT(DISTINCT cluster_id) FROM clusters WHERE cluster_id > 0"
         ).fetchone()[0]
         garbage = conn.execute(
             "SELECT COUNT(*) FROM clusters WHERE cluster_id = ?", (config.GARBAGE_LABEL,)
         ).fetchone()[0]
-        # Общий размер всех изображений в байтах
         total_size = conn.execute("SELECT COALESCE(SUM(size), 0) FROM images").fetchone()[0]
         return {
             "total": total,
@@ -831,5 +827,26 @@ def load_db_stats():
             "garbage": garbage,
             "total_size": total_size,
         }
+    finally:
+        conn.close()
+
+
+def has_pending_dedup():
+    """Возвращает True, если есть изображения без pHash и не отмеченные как повреждённые.
+
+    Используется для скрытия неинформативной статистики уникальных/дубликатов,
+    когда дедупликация не была завершена для всех файлов.
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM images i
+            LEFT JOIN image_hashes h ON i.id = h.image_id
+            LEFT JOIN failed_files f ON i.path = f.path
+            WHERE h.image_id IS NULL AND f.path IS NULL
+            """
+        ).fetchone()
+        return row[0] > 0 if row else False
     finally:
         conn.close()

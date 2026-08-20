@@ -900,8 +900,11 @@ class ImageDedupApp:
             # Дедупликация для только что найденных файлов ещё не выполнена:
             # до её завершения строки в dedup_groups отсутствуют, поэтому
             # из БД получили бы уникальные == общему числу файлов, что неверно.
-            # Показываем 0 (как было по умолчанию), а не обманчивое N.
+            # Также на старте приложения, если файлы есть, но дедупликация
+            # не была завершена (нет pHash), показываем 0, а не обманчивое N.
             dedup_pending = getattr(self, '_scan_phase', 'idle') in ("scan", "dedup")
+            if not dedup_pending:
+                dedup_pending = await asyncio.to_thread(database.has_pending_dedup) and stats["total"] > 0
             if dedup_pending:
                 self.stat_duplicates.value = "0"
                 self.stat_unique.value = "0"

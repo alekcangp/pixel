@@ -19,6 +19,24 @@ from PIL import Image
 
 warnings.filterwarnings('ignore')
 
+# 16-битная таблица popcount (фолбэк для numpy 1.x, где нет np.bitwise_count).
+_POPCOUNT16 = np.array([bin(v).count("1") for v in range(1 << 16)], dtype=np.uint8)
+
+
+def _hamming_distances(xor):
+    """popcount для массива uint64 (XOR). numpy2 -> np.bitwise_count, иначе 16-битная таблица."""
+    bc = getattr(np, "bitwise_count", None)
+    if bc is not None:
+        return bc(xor)
+    return _POPCOUNT16[xor.view(np.uint16).reshape(-1, 4)].sum(axis=1)
+
+
+def _default_phash_workers():
+    """Auto threads for pHash (4..8 by cpu)."""
+    cpu = os.cpu_count() or 4
+    return max(4, min(cpu, 8))
+
+
 import config
 from core import database
 from core import scanner
@@ -181,9 +199,7 @@ class LSHIndex:
         cand_list = sorted(candidates)
         cand_hashes = np.array([self._hashes[j] for j in cand_list], dtype=np.uint64)
         h_arr = np.full(len(cand_list), query_hash, dtype=np.uint64)
-        xor = np.bitwise_xor(h_arr, cand_hashes)
-        xor_bytes = xor.view(np.uint8).reshape(-1, 8)
-        dists = np.unpackbits(xor_bytes, axis=1).sum(axis=1)
+        dists = _hamming_distances(np.bitwise_xor(h_arr, cand_hashes))
 
         results = []
         for j, d in zip(cand_list, dists):
@@ -202,9 +218,8 @@ class LSHIndex:
         if n == 0:
             return []
 
-        # Оптимизация: banding-подход
-        # Для каждого подблока строим группы элементов с одинаковым значением
-        # и объединяем только внутри групп.
+        # Оптимизация: banding-подход.
+        # Для каждого подблока строим инвертированный лист элементов с одинаковым значением.
         block_groups = defaultdict(list)
         for i, (_, h) in enumerate(self._items):
             offset = 0
@@ -215,35 +230,40 @@ class LSHIndex:
                 block_groups[(b, block_val)].append(i)
                 offset += size
 
-        # Для каждого элемента собираем кандидатов по совпадающим подблокам
-        # и объединяем через Union-Find
+        # pHash-дубликаты отличаются не более чем на threshold бит из 64. При B
+        # подблоках кандидат обязан совпадать минимум с (B - threshold) подблоками.
+        # Требуем >= 2 общих подблока: исключает случайные коллизии блоков,
+        # не теряя настоящих дубликатов.
+        min_bands = max(2, self._B - self._threshold)
+        hashes_arr = np.array(self._hashes, dtype=np.uint64) if self._hashes else None
         processed = 0
         for i, (_, h) in enumerate(self._items):
             if scanner.STOP_REQUESTED:
                 print("\nОстановка кластеризации pHash по запросу пользователя.")
                 break
-            # Собираем кандидатов по всем подблокам элемента i
-            candidates = set()
+
+            # Считаем, со сколькими подблоками совпадает каждый элемент.
+            common = defaultdict(int)
             offset = 0
             for b in range(self._B):
                 size = self._block_sizes[b]
                 shift = 64 - offset - size
                 block_val = (h >> shift) & ((1 << size) - 1)
-                candidates.update(block_groups.get((b, block_val), []))
+                for j in block_groups.get((b, block_val), ()):
+                    common[j] += 1
                 offset += size
 
-            if not candidates:
+            cand_list = [j for j, c in common.items() if c >= min_bands and j != i]
+            if not cand_list:
                 processed += 1
+                if progress_callback is not None:
+                    progress_callback("dedup", processed, n, "Кластеризация pHash")
                 continue
 
-            # Векторизованное вычисление Hamming distance
-            cand_list = sorted(candidates)
-            cand_hashes = np.array([self._hashes[j] for j in cand_list], dtype=np.uint64)
+            # Векторизованное вычисление Hamming distance.
+            cand_hashes = hashes_arr[cand_list]
             h_arr = np.full(len(cand_list), h, dtype=np.uint64)
-            xor = np.bitwise_xor(h_arr, cand_hashes)
-            xor_bytes = xor.view(np.uint8).reshape(-1, 8)
-            dists = np.unpackbits(xor_bytes, axis=1).sum(axis=1)
-
+            dists = _hamming_distances(np.bitwise_xor(h_arr, cand_hashes))
             for j, d in zip(cand_list, dists):
                 if d <= self._threshold:
                     uf.union(i, j)
@@ -283,9 +303,12 @@ def _process_single(path):
     return (path, h), "ok"
 
 
-def find_similar_images(files, max_workers=4, progress_callback=None, existing_hashes=None):
+def find_similar_images(files, max_workers=None, progress_callback=None, existing_hashes=None):
     paths_to_process = [f["path"] for f in files]
     total = len(paths_to_process)
+
+    if max_workers is None:
+        max_workers = _default_phash_workers()
 
     if total == 0 and not existing_hashes:
         return [], [], {}, {}
@@ -534,7 +557,19 @@ def run(move_to=None, progress_callback=None, incremental=True):
     )
 
     if scanner.STOP_REQUESTED:
-        print("\nДедупликация остановлена. Частичные результаты не сохранены.")
+        print("\nДедупликация остановлена. Сохранение частичных результатов...")
+        if hash_map:
+            mtime_map_for_save = {p: current_mtime_map.get(p, 0) for p in hash_map}
+            if incremental:
+                database.save_phashes_incremental(hash_map, mtime_map_for_save)
+            else:
+                all_hashes = dict(database.load_phashes() or {})
+                all_hashes.update(hash_map)
+                all_mtime = {p: current_mtime_map.get(p, 0) for p in all_hashes}
+                database.save_phashes(all_hashes, all_mtime)
+        if failed_paths:
+            database.save_failed_files(failed_paths, failed_reasons, incremental=incremental)
+        print("Частичные результаты сохранены.")
         return None
 
     # Сохраняем вычисленные хэши инкрементально (с mtime)

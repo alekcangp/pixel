@@ -15,6 +15,67 @@ CMD="${1:-}"
 log() { echo -e "\033[1;34m[Pixel]\033[0m $*"; }
 fail() { echo -e "\033[1;31m[Pixel] Error:\033[0m $*" >&2; read -p "Press any key to exit..."; exit 1; }
 
+auto_install_python_macos() {
+    local PKG_URL="https://www.python.org/ftp/python/3.12.9/python-3.12.9-macos11.pkg"
+    local PKG_FILE="$TMPDIR/python-3.12.9-macos11.pkg"
+    log "Downloading Python 3.12.9 installer..."
+    if ! curl -fsSL "$PKG_URL" -o "$PKG_FILE"; then
+        log "Download failed. Opening Python.org download page..."
+        open "https://www.python.org/downloads/release/python-3129/"
+        read -p "Press any key to exit..."
+        return 1
+    fi
+    log "Installing Python 3.12.9 silently..."
+    if ! sudo installer -pkg "$PKG_FILE" -target /; then
+        log "Silent install failed. Opening Python.org download page..."
+        open "https://www.python.org/downloads/release/python-3129/"
+        read -p "Press any key to exit..."
+        return 1
+    fi
+    rm -f "$PKG_FILE"
+    return 0
+}
+
+# Detect available Python executable
+PYTHON_CMD=""
+for p in python3 python python3.12; do
+    if command -v "$p" >/dev/null 2>&1; then
+        PYTHON_CMD="$p"
+        break
+    fi
+done
+
+if [ -z "$PYTHON_CMD" ]; then
+    log "Python not found. Installing Python 3.12..."
+    if command -v brew >/dev/null 2>&1; then
+        log "Homebrew found. Installing python@3.12..."
+        brew install python@3.12 || fail "brew install python@3.12 failed"
+        for p in python3 python python3.12; do
+            if command -v "$p" >/dev/null 2>&1; then
+                PYTHON_CMD="$p"
+                break
+            fi
+        done
+    else
+        log "Homebrew not found. Installing Python 3.12 from python.org..."
+        if ! auto_install_python_macos; then
+            fail "Python install failed. Restart the terminal and run ./pixel.command again"
+        fi
+        for p in python3 python python3.12; do
+            if command -v "$p" >/dev/null 2>&1; then
+                PYTHON_CMD="$p"
+                break
+            fi
+        done
+    fi
+fi
+
+if [ -z "$PYTHON_CMD" ]; then
+    fail "Python not found after install attempt. Restart the terminal and run ./pixel.command again"
+fi
+
+echo "[Pixel] Using Python: $PYTHON_CMD"
+
 # No argument: install (if venv missing) + run
 if [ -z "$CMD" ]; then
     if [ ! -x ".venv/bin/python3" ]; then
@@ -28,7 +89,7 @@ case "$CMD" in
     install)
         log "Setting up virtual environment..."
         if [ ! -x ".venv/bin/python3" ]; then
-            python3 -m venv .venv || fail "failed to create venv"
+            "$PYTHON_CMD" -m venv .venv || fail "failed to create venv"
         fi
         source .venv/bin/activate
 

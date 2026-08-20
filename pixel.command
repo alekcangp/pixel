@@ -6,7 +6,7 @@
 #    ./pixel.command            install (if needed) + run
 #    ./pixel.command install    install only (venv + deps + model)
 #    ./pixel.command run        run only
-#    ./pixel.command uninstall  uninstall (venv, DB, model cache)
+#    ./pixel.command uninstall  uninstall (venv, DB, model cache, app files)
 # ============================================================
 cd "$(dirname "$0")"
 
@@ -124,6 +124,9 @@ PY
         log "Removing HuggingFace model cache..."
         rm -rf ~/.cache/huggingface/hub/models--google--siglip-base-patch16-224 2>/dev/null || true
         rm -rf ~/.cache/torch/transformers/google--siglip-base-patch16-224 2>/dev/null || true
+        log "Removing application files..."
+        APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+        (sleep 3 && rm -rf "$APP_DIR") &
         log "Uninstall complete."
         read -p "Press any key to exit..."
         ;;

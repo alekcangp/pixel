@@ -6,7 +6,7 @@ rem  Usage:
 rem    pixel.bat            install (if needed) + run
 rem    pixel.bat install    install only (venv + deps + model)
 rem    pixel.bat run        run only
-rem    pixel.bat uninstall  uninstall (venv, DB, model cache)
+rem    pixel.bat uninstall  uninstall (venv, DB, model cache, app files)
 rem ============================================================
 setlocal
 cd /d "%~dp0"
@@ -36,7 +36,6 @@ if "%PYTHON_CMD%"=="" (
         exit /b 1
     )
     echo [Pixel] Python installed successfully.
-    rem Re-detect after install
     set "PYTHON_CMD="
     for %%p in (python.exe python3.exe py.exe) do (
         where "%%p" >nul 2>&1
@@ -105,6 +104,9 @@ if exist "storage" del /f /q "storage\*.db" "storage\*.db-journal" "storage\*.db
 echo [Pixel] Removing HuggingFace model cache...
 if exist "%USERPROFILE%\.cache\huggingface\hub\models--google--siglip-base-patch16-224" rmdir /s /q "%USERPROFILE%\.cache\huggingface\hub\models--google--siglip-base-patch16-224"
 if exist "%USERPROFILE%\.cache\torch\transformers\google--siglip-base-patch16-224" rmdir /s /q "%USERPROFILE%\.cache\torch\transformers\google--siglip-base-patch16-224"
+echo [Pixel] Removing application files...
+set "APP_DIR=%~dp0"
+start /b "" cmd /c "ping -n 4 127.0.0.1 >nul & rmdir /s /q "%APP_DIR%""
 echo [Pixel] Uninstall complete.
 pause
 goto :EOF

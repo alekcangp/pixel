@@ -1182,6 +1182,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                     None, None, None,
                     incremental=True,
                     progress_callback=disk_progress_cb,
+                    total=disk_total,
                 ))
                 self._scan_worker_tasks.append(task)
                 try:

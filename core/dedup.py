@@ -549,23 +549,6 @@ def run(move_to=None, progress_callback=None, incremental=True):
             all_mtime = {p: current_mtime_map.get(p, 0) for p in all_hashes}
             database.save_phashes(all_hashes, all_mtime)
 
-    # Если инкрементальный режим — объединяем с существующими группами
-    if incremental and existing_with_mtime:
-        # Загружаем существующие группы
-        existing_groups = database.load_dedup_groups() or []
-        # Объединяем: новые группы + существующие (которые не пересекаются с новыми)
-        new_paths = set()
-        for group in similar:
-            new_paths.update(group)
-
-        # Оставляем существующие группы, которые не содержат новых файлов
-        preserved_groups = []
-        for group in existing_groups:
-            if not any(p in new_paths for p in group):
-                preserved_groups.append(group)
-
-        similar = preserved_groups + similar
-
     # Выбираем эталонный файл для каждой группы дубликатов.
     # Только эталоны (is_canonical=1) пойдут в эмбеддинг; дубликаты исключаются.
     canonical_paths = set()
@@ -573,13 +556,18 @@ def run(move_to=None, progress_callback=None, incremental=True):
         if len(group) >= 2:
             canonical_paths.add(_pick_canonical(group))
 
-    database.save_dedup_groups(similar, canonical_paths)
+    # Сохранение групп. В инкрементальном режиме save_dedup_groups сам объединяет
+    # новые группы с уже хранящимися в БД (группы, не пересекающиеся с новым list,
+    # сохраняются), поэтому слияние не зависит от состояния кэша pHash и не грязное
+    # между инкрементными прогонами.
+    database.save_dedup_groups(similar, canonical_paths, incremental=incremental)
     database.save_failed_files(failed_paths, failed_reasons, incremental=incremental)
 
-    print_stats(similar, files, failed_paths, failed_reasons)
-
-    # Пересчитываем статистику из БД (чтобы учитывать только сохранённые записи)
+    # Пересчитываем статистику из БД — полный набор групп после merge-сохранения
+    # (не только новые, чтобы отчёт отражал реальное состояние индекса).
     saved_groups = database.load_dedup_groups() or []
+    print_stats(saved_groups, files, failed_paths, failed_reasons)
+
     total_files = len(files)
     similar_files = sum(len(group) for group in saved_groups)
     similar_dup_files = sum(len(group) - 1 for group in saved_groups)
@@ -606,9 +594,9 @@ def run(move_to=None, progress_callback=None, incremental=True):
 
     if move_to:
         print("\nПеремещение дубликатов в: %s" % move_to)
-        moved, freed = _move_duplicates(similar, move_to)
+        moved, freed = _move_duplicates(saved_groups, move_to)
         print("Перемещено файлов: %d" % moved)
         print("Освобождено: %.2f MB" % (freed / (1024 ** 2)))
 
     print("Результат сохранён в БД: %s" % config.DB_FILE)
-    return similar, failed_paths, failed_reasons
+    return saved_groups, failed_paths, failed_reasons

@@ -616,37 +616,70 @@ def load_clusters_with_names():
 # Dedup groups
 # ============================================================
 
-def save_dedup_groups(groups, canonical_paths=None):
+def save_dedup_groups(groups, canonical_paths=None, incremental=False):
     """Сохраняет группы дубликатов.
 
     groups:          list[list[str]] (каждый — список путей).
     canonical_paths: set/list путей-эталонов (is_canonical=1).
+
+    При incremental=True старые группы, не пересекающиеся с новым списком
+    (вычисляются по путям), сохраняются — глава таблицы не стирается вслепую.
+    Это исключает риск потери групп, когда инкрементальный прогон обработал
+    только новые/изменённые файлы, а кэш pHash пуст/частичен.
     """
     conn = _get_conn()
     try:
-        conn.execute("DELETE FROM dedup_groups")
         if canonical_paths is None:
             canonical_set = None
         else:
             canonical_set = set(canonical_paths)
 
-        # Загружаем все path → id одним запросом вместо N отдельных SELECT
+        # path → id одним запросом вместо N отдельных SELECT
         path_to_id = {r["path"]: r["id"] for r in conn.execute("SELECT id, path FROM images").fetchall()}
 
+        if incremental:
+            # Загружаем существующие группы (по групповым ID), чтобы не потерять
+            # те, что не покрыты новым списком (например, при частичной переиндексации).
+            existing_rows = conn.execute(
+                "SELECT i.path, g.group_id, g.is_canonical "
+                "FROM dedup_groups g JOIN images i ON g.image_id = i.id "
+                "ORDER BY g.group_id, i.id"
+            ).fetchall()
+            existing_groups = {}
+            for r in existing_rows:
+                existing_groups.setdefault(int(r["group_id"]), []).append(r["path"])
+        else:
+            existing_groups = {}
+
+        # Пути, входящие в новые группы, — считаем покрытыми.
+        new_paths = set()
+        for group in groups:
+            for p in group:
+                new_paths.add(p)
+
+        # Собираем пункт окончательного списка групп:
+        # сначала новые (не пересекающиеся с существующими сохраняются), потом сохранённые старые.
+        merged = [g for g in groups]
+        for gid, paths in existing_groups.items():
+            if not any(p in new_paths for p in paths):
+                merged.append(paths)
+
+        conn.execute("DELETE FROM dedup_groups")
         rows = []
-        for group_id, paths in enumerate(groups):
+        for group_id, paths in enumerate(merged):
             for path in paths:
                 image_id = path_to_id.get(path)
-                if image_id is not None:
-                    if canonical_set is None:
-                        is_can = 1
-                    elif path in canonical_set:
-                        is_can = 1
-                    elif len(paths) == 1:
-                        is_can = 1
-                    else:
-                        is_can = 0
-                    rows.append((group_id, image_id, is_can))
+                if image_id is None:
+                    continue
+                if canonical_set is None:
+                    is_can = 1
+                elif path in canonical_set:
+                    is_can = 1
+                elif len(paths) == 1:
+                    is_can = 1
+                else:
+                    is_can = 0
+                rows.append((group_id, image_id, is_can))
         conn.executemany(
             "INSERT OR REPLACE INTO dedup_groups (group_id, image_id, is_canonical) VALUES (?, ?, ?)", rows
         )

@@ -62,15 +62,20 @@ def _count_matching_files(path, extensions=None, exclude_dirs=None, min_size=Non
     return count
 
 
-def scan_directory(path, extensions=None, exclude_dirs=None, min_size=None, progress_callback=None):
-    """Рекурсивно сканирует директорию, собирает файлы с указанными расширениями."""
-    global STOP_REQUESTED
+def scan_directory(path, extensions=None, exclude_dirs=None, min_size=None, progress_callback=None, total=None):
+    """Рекурсивно сканирует директорию, собирает файлы с указанными расширениями.
+
+    total: необязательная подсказка общего числа файлов (если она уже была заранее
+    посчитана вызывающей стороной, повторный проход для подсчёта не выполняется).
+    Это позволяет GUI избежать тройного обхода дерева (UI-count → scan count → collect).
+    """
     ext_set = set(_normalize_extensions(extensions))
     exclude_set = _normalize_exclude_dirs(exclude_dirs)
     if min_size is None:
         min_size = config.MIN_FILE_SIZE
 
-    total = _count_matching_files(path, extensions=extensions, exclude_dirs=exclude_dirs, min_size=min_size)
+    if total is None:
+        total = _count_matching_files(path, extensions=extensions, exclude_dirs=exclude_dirs, min_size=min_size)
     files = []
     processed = 0
     stack = [path]
@@ -118,7 +123,7 @@ def scan_directory(path, extensions=None, exclude_dirs=None, min_size=None, prog
     return files
 
 
-def incremental_scan(path, extensions=None, exclude_dirs=None, min_size=None, progress_callback=None):
+def incremental_scan(path, extensions=None, exclude_dirs=None, min_size=None, progress_callback=None, total=None):
     """Инкрементальное сканирование: возвращает (new_files, changed_files, removed_paths, all_files)."""
     ext_set = set(_normalize_extensions(extensions))
     exclude_set = _normalize_exclude_dirs(exclude_dirs)
@@ -129,7 +134,7 @@ def incremental_scan(path, extensions=None, exclude_dirs=None, min_size=None, pr
     existing_paths = set(existing.keys())
 
     # Сканируем текущее состояние
-    all_files = scan_directory(path, extensions=extensions, exclude_dirs=exclude_dirs, min_size=min_size, progress_callback=progress_callback)
+    all_files = scan_directory(path, extensions=extensions, exclude_dirs=exclude_dirs, min_size=min_size, progress_callback=progress_callback, total=total)
     all_paths = {f["path"] for f in all_files}
 
     new_files = []
@@ -180,7 +185,7 @@ def print_stats(files):
         print(f"  {f['path']} ({f['size']} bytes)")
 
 
-def run(path, extensions, exclude_dirs=None, min_size=None, progress_callback=None, incremental=True):
+def run(path, extensions, exclude_dirs=None, min_size=None, progress_callback=None, incremental=True, total=None):
     if not os.path.isdir(path):
         print("Путь не найден или не является директорией: %s" % path)
         return None
@@ -193,7 +198,7 @@ def run(path, extensions, exclude_dirs=None, min_size=None, progress_callback=No
 
     if incremental:
         new_files, changed_files, removed_paths, all_files = incremental_scan(
-            path, extensions, exclude_dirs, min_size=min_size, progress_callback=progress_callback
+            path, extensions, exclude_dirs, min_size=min_size, progress_callback=progress_callback, total=total
         )
         if not all_files:
             print("Файлы не найдены (проверьте путь и расширения).")

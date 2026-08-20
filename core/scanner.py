@@ -1,4 +1,3 @@
-import hashlib
 import os
 import sys
 from collections import Counter
@@ -20,28 +19,6 @@ def _normalize_exclude_dirs(exclude_dirs):
     if exclude_dirs is None:
         exclude_dirs = []
     return {d.lower() for d in config.DEFAULT_EXCLUDE_DIRS + list(exclude_dirs)}
-
-
-def _file_hash(path, size=None):
-    """Быстрый хэш содержимого файла (xxhash первых 64 КБ + размер)."""
-    try:
-        if size is None:
-            size = os.path.getsize(path)
-        if size == 0:
-            return ("0", 0)
-        # Используем xxhash если доступен, иначе md5
-        try:
-            import xxhash
-            h = xxhash.xxh64()
-        except ImportError:
-            h = hashlib.md5()
-        read_size = min(size, 65536)
-        with open(path, "rb") as f:
-            data = f.read(read_size)
-            h.update(data)
-        return (h.hexdigest(), size)
-    except Exception:
-        return (None, size if size is not None else -1)
 
 
 def _count_matching_files(path, extensions=None, exclude_dirs=None, min_size=None):
@@ -124,13 +101,11 @@ def scan_directory(path, extensions=None, exclude_dirs=None, min_size=None, prog
                                 mtime = 0
                             if size < min_size:
                                 continue
-                            file_hash, _ = _file_hash(entry.path, size)
                             files.append({
                                 "path": entry.path,
                                 "size": size,
                                 "ext": ext,
                                 "mtime": mtime,
-                                "file_hash": file_hash or "",
                             })
                             processed += 1
                             if progress_callback is not None:
@@ -167,10 +142,9 @@ def incremental_scan(path, extensions=None, exclude_dirs=None, min_size=None, pr
         if old is None:
             new_files.append(f)
         else:
-            # Проверяем, изменился ли файл
+            # Проверяем, изменился ли файл (по размеру или mtime)
             if (f["size"] != old["size"] or 
-                f["mtime"] != old["mtime"] or 
-                (f["file_hash"] and f["file_hash"] != old["file_hash"])):
+                f["mtime"] != old["mtime"]):
                 changed_files.append(f)
 
     # Удалённые — только файлы, принадлежащие текущему источнику

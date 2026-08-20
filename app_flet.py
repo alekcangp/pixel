@@ -9,13 +9,13 @@ from tkinter import filedialog
 from pathlib import Path
 from PIL import Image as PILImage
 
-# ВАЖНО: до импорта torch/faiss ограничиваем OpenMP одним потоком.
-# Иначе на Apple Silicon (MPS) при фоновой загрузке SigLIP-модели PyTorch
-# создаёт по потоку на ядро CPU, что приводит к
-# "OMP: Error #179: pthread_mutex_init failed" и segmentation fault при запуске GUI.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-
 import config
+
+# Единая настройка окружения (OMP/предупреждения) ДО импорта torch/faiss,
+# чтобы фоновый импорт/lazy-загрузка SigLIP не создавали лишние OMP-потоки
+# и не падали с "OMP: Error #179" на Apple Silicon.
+config.setup_environment()
+
 from i18n import LANG, tr, set_language, is_all_disks
 from core import database, scanner, dedup, embedder, clustererhdb, search, thumbnail_cache
 
@@ -102,6 +102,15 @@ class ImageDedupApp:
         # Не зависит от языка, поэтому сброс заголовка не ломается при
         # переключении языка во время фоновой генерации миниатюр.
         self._win_progress_key = None
+
+        self._WARM_PRIMARY = "#C9A96E"
+        self._WARM_ON_PRIMARY = "#1C1610"
+        self._WARM_PRIMARY_CONTAINER = "#4A3F2F"
+        self._WARM_ON_PRIMARY_CONTAINER = "#F0E6D6"
+        self._WARM_SURFACE = "#4A4238"
+        self._WARM_ON_SURFACE = "#E8DCC8"
+        self._WARM_ON_SURFACE_VARIANT = "#A89880"
+        self._WARM_ERROR = "#CF6679"
 
         
         # Состояние выбора изображений
@@ -202,25 +211,17 @@ class ImageDedupApp:
                 self.sidebar_clusters,
             ],
             expand=True,
-        )
+                )
+
         self.sidebar = ft.Container(
-            content=ft.Stack(
-                [
-                    ft.Container(
-                        expand=True,
-                        image=ft.DecorationImage(
-                            src=self._wallpaper_path("wallpaper_left.png"),
-                            fit=ft.BoxFit.COVER,
-                            repeat=ft.ImageRepeat.REPEAT_Y,
-                        ),
-                    ),
-                    ft.Container(
-                        content=sidebar_content,
-                        bgcolor=ft.Colors.with_opacity(0.88, ft.Colors.SURFACE_CONTAINER),
-                        padding=15,
-                        expand=True,
-                    ),
-                ],
+            image=ft.DecorationImage(
+                src=os.path.join(config.BASE_DIR, "assets", "wallpaper_left.png"),
+                fit=ft.BoxFit.COVER,
+            ),
+            content=ft.Container(
+                content=sidebar_content,
+                bgcolor=ft.Colors.with_opacity(0.1, self._WARM_SURFACE),
+                padding=15,
                 expand=True,
             ),
             width=280,
@@ -248,24 +249,15 @@ class ImageDedupApp:
             spacing=10,
         )
         self.main_content = ft.Container(
-            content=ft.Stack(
-                [
-                    ft.Container(
-                        expand=True,
-                        image=ft.DecorationImage(
-                            src=self._wallpaper_path("wallpaper_right.png"),
-                            fit=ft.BoxFit.COVER,
-                            repeat=ft.ImageRepeat.REPEAT_X,
-                        ),
-                    ),
-                    ft.Container(
-                        content=main_content_column,
-                        bgcolor=ft.Colors.with_opacity(0.88, ft.Colors.SURFACE_CONTAINER),
-                        padding=15,
-                        border_radius=10,
-                        expand=True,
-                    ),
-                ],
+            image=ft.DecorationImage(
+                src=os.path.join(config.BASE_DIR, "assets", "wallpaper_right.png"),
+                fit=ft.BoxFit.COVER,
+            ),
+            content=ft.Container(
+                content=main_content_column,
+                bgcolor=ft.Colors.with_opacity(0.1, self._WARM_SURFACE),
+                padding=15,
+                border_radius=10,
                 expand=True,
             ),
             expand=True,
@@ -273,7 +265,7 @@ class ImageDedupApp:
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
         
-        # Добавляем на страницу
+        # Добавляем на страницу: вся разметка поверх отдельных фонов.
         self.page.add(
             ft.Column(
                 [
@@ -289,9 +281,7 @@ class ImageDedupApp:
             )
         )
     
-    def _wallpaper_path(self, filename: str) -> str:
-        """Возвращает абсолютный путь к обоям в assets/."""
-        return os.path.join(config.BASE_DIR, "assets", filename)
+
 
     def _set_window_progress(self, label: str, current: int = 0, total: int = 0, key: str = None):
         """Показывает стадию и счётчик в заголовке окна, напр. 'Сканирование... 3/100'.
@@ -429,27 +419,27 @@ class ImageDedupApp:
         """Обновляет стили кнопки языка."""
         if is_active:
             btn.style = ft.ButtonStyle(
-                bgcolor=ft.Colors.PRIMARY,
-                color=ft.Colors.ON_PRIMARY,
+                bgcolor=self._WARM_PRIMARY,
+                color=self._WARM_ON_PRIMARY,
             )
         else:
             btn.style = ft.ButtonStyle(
-                bgcolor=ft.Colors.SURFACE_CONTAINER,
-                color=ft.Colors.ON_SURFACE,
+                bgcolor=self._WARM_SURFACE,
+                color=self._WARM_ON_SURFACE,
             )
 
     def create_stats_section(self):
         """Секция статистики"""
-        self.stat_total = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
-        self.stat_total_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.stat_duplicates = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.RED)
-        self.stat_duplicates_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.stat_unique = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
-        self.stat_unique_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
-        self.stat_selected = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
-        self.stat_selected_size = ft.Text("0 " + tr("unit.B"), size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.stat_total = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=self._WARM_PRIMARY)
+        self.stat_total_size = ft.Text("0 " + tr("unit.B"), size=11, color=self._WARM_ON_SURFACE_VARIANT)
+        self.stat_duplicates = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=self._WARM_ERROR)
+        self.stat_duplicates_size = ft.Text("0 " + tr("unit.B"), size=11, color=self._WARM_ON_SURFACE_VARIANT)
+        self.stat_unique = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color="#81C784")
+        self.stat_unique_size = ft.Text("0 " + tr("unit.B"), size=11, color=self._WARM_ON_SURFACE_VARIANT)
+        self.stat_selected = ft.Text("0", size=16, weight=ft.FontWeight.BOLD, color=self._WARM_PRIMARY)
+        self.stat_selected_size = ft.Text("0 " + tr("unit.B"), size=11, color=self._WARM_ON_SURFACE_VARIANT)
         
-        self.stats_title_text = ft.Text(tr("stat.title"), size=18, weight=ft.FontWeight.BOLD)
+        self.stats_title_text = ft.Text(tr("stat.title"), size=16, weight=ft.FontWeight.BOLD)
         self.stat_total_label = ft.Text(tr("stat.total"), size=11)
         self.stat_dupes_label = ft.Text(tr("stat.dupes"), size=11)
         self.stat_unique_label = ft.Text(tr("stat.unique"), size=11)
@@ -492,7 +482,7 @@ class ImageDedupApp:
         self.clusters_grid = ft.Column([])
         
         # Заголовок с количеством категорий
-        self.categories_header = ft.Text(tr("categories.title", count=0), size=18, weight=ft.FontWeight.BOLD)
+        self.categories_header = ft.Text(tr("categories.title", count=0), size=16, weight=ft.FontWeight.BOLD)
         
         # Активный кластер для подсветки
         self.active_cluster_id = None
@@ -542,14 +532,14 @@ class ImageDedupApp:
                     is_active = self.active_cluster_id == cluster_id
                     has_selected = any(path in self.selected_images for path in members)
                     if is_active:
-                        bgcolor = ft.Colors.PRIMARY
-                        color = ft.Colors.ON_PRIMARY
+                        bgcolor = self._WARM_PRIMARY
+                        color = self._WARM_ON_PRIMARY
                     elif has_selected:
-                        bgcolor = ft.Colors.PRIMARY_CONTAINER
-                        color = ft.Colors.ON_PRIMARY_CONTAINER
+                        bgcolor = self._WARM_PRIMARY_CONTAINER
+                        color = self._WARM_ON_PRIMARY_CONTAINER
                     else:
-                        bgcolor = ft.Colors.SURFACE_CONTAINER_HIGHEST
-                        color = ft.Colors.ON_SURFACE
+                        bgcolor = self._WARM_SURFACE
+                        color = self._WARM_ON_SURFACE
                     button = ft.ElevatedButton(
                         f"{self._cluster_display_map[cluster_id]} ({len(members)})",
                         data=cluster_id,
@@ -559,6 +549,7 @@ class ImageDedupApp:
                         color=color,
                         on_click=self.on_cluster_button_click,
                         style=ft.ButtonStyle(
+                            text_style=ft.TextStyle(size=13, weight=ft.FontWeight.BOLD),
                             padding=ft.Padding(6, 4, 6, 4),
                             shape=ft.RoundedRectangleBorder(radius=6),
                         ),
@@ -624,26 +615,30 @@ class ImageDedupApp:
         self.mode_scan_btn = ft.ElevatedButton(
             tr("scan.button.scan"),
             icon=ft.Icons.SEARCH,
-            bgcolor=ft.Colors.PRIMARY,
-            color=ft.Colors.ON_PRIMARY,
+            bgcolor=self._WARM_SURFACE,
+            color=self._WARM_ON_SURFACE,
             tooltip=tr("scan.button.scan"),
             on_click=lambda e: self.switch_mode("scan"),
         )
         self.mode_search_btn = ft.ElevatedButton(
             tr("tab.search"),
             icon=ft.Icons.SEARCH,
+            bgcolor=self._WARM_SURFACE,
+            color=self._WARM_ON_SURFACE,
             on_click=lambda e: self.switch_mode("search"),
         )
         self.mode_export_btn = ft.ElevatedButton(
             tr("tab.export"),
             icon=ft.Icons.FOLDER_OPEN,
+            bgcolor=self._WARM_SURFACE,
+            color=self._WARM_ON_SURFACE,
             on_click=lambda e: self.switch_mode("export"),
         )
         self.reset_button = ft.ElevatedButton(
             tr("scan.button.reset"),
             icon=ft.Icons.DELETE_FOREVER,
-            bgcolor=ft.Colors.ERROR,
-            color=ft.Colors.ON_ERROR,
+            bgcolor=self._WARM_ERROR,
+            color="#000000",
             tooltip=tr("scan.button.reset"),
             on_click=self._show_reset_dialog,
         )
@@ -680,8 +675,8 @@ class ImageDedupApp:
             tr("scan.button.start"),
             icon=ft.Icons.PLAY_ARROW,
             height=48,
-            bgcolor=ft.Colors.PRIMARY,
-            color=ft.Colors.ON_PRIMARY,
+            bgcolor=self._WARM_PRIMARY,
+            color=self._WARM_ON_PRIMARY,
             on_click=lambda e: asyncio.create_task(self.toggle_scan(e)),
         )
         self.scan_context_row = ft.Row(
@@ -702,8 +697,8 @@ class ImageDedupApp:
             tr("search.button"),
             icon=ft.Icons.SEARCH,
             height=48,
-            bgcolor=ft.Colors.PRIMARY,
-            color=ft.Colors.ON_PRIMARY,
+            bgcolor=self._WARM_PRIMARY,
+            color=self._WARM_ON_PRIMARY,
             tooltip=tr("search.button"),
             on_click=self.do_search,
         )
@@ -738,8 +733,8 @@ class ImageDedupApp:
             tr("export.button"),
             icon=ft.Icons.DOWNLOAD,
             height=48,
-            bgcolor=ft.Colors.PRIMARY,
-            color=ft.Colors.ON_PRIMARY,
+            bgcolor=self._WARM_PRIMARY,
+            color=self._WARM_ON_PRIMARY,
             tooltip=tr("export.button"),
             on_click=self.toggle_export,
         )
@@ -774,24 +769,26 @@ class ImageDedupApp:
     
     def _update_mode_buttons(self):
         """Подсветка активной кнопки режима."""
-        self.mode_search_btn.style = (
-            ft.ButtonStyle(bgcolor=ft.Colors.PRIMARY, color=ft.Colors.ON_PRIMARY)
-            if self.current_mode == "search" else None
-        )
-        self.mode_export_btn.style = (
-            ft.ButtonStyle(bgcolor=ft.Colors.PRIMARY, color=ft.Colors.ON_PRIMARY)
-            if self.current_mode == "export" else None
-        )
-        # Кнопка сканирования: PRIMARY в режиме scan, де-эмфаза в остальных
-        # (во время сканирования её состояние управляется toggle_scan — красная Stop).
-        if self.current_mode == "scan":
-            if not self.scanning:
-                self.mode_scan_btn.bgcolor = ft.Colors.PRIMARY
-                self.mode_scan_btn.color = ft.Colors.ON_PRIMARY
-        else:
-            if not self.scanning:
-                self.mode_scan_btn.bgcolor = None
-                self.mode_scan_btn.color = None
+        for btn in (self.mode_scan_btn, self.mode_search_btn, self.mode_export_btn):
+            is_active = (
+                (btn is self.mode_scan_btn and self.current_mode == "scan") or
+                (btn is self.mode_search_btn and self.current_mode == "search") or
+                (btn is self.mode_export_btn and self.current_mode == "export")
+            )
+            if is_active and not self.scanning:
+                btn.bgcolor = self._WARM_PRIMARY
+                btn.color = self._WARM_ON_PRIMARY
+                btn.style = ft.ButtonStyle(
+                    bgcolor=self._WARM_PRIMARY,
+                    color=self._WARM_ON_PRIMARY,
+                )
+            else:
+                btn.bgcolor = self._WARM_SURFACE
+                btn.color = self._WARM_ON_SURFACE
+                btn.style = ft.ButtonStyle(
+                    bgcolor=self._WARM_SURFACE,
+                    color=self._WARM_ON_SURFACE,
+                )
 
     def _update_context_row(self):
         """Показывает контекстные контролы текущего режима."""
@@ -1090,7 +1087,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 return
             
             if not files:
-                self.show_snackbar(tr("scan.no_files"), ft.Colors.ORANGE)
+                self.show_snackbar(tr("scan.no_files"), "#FFB74D")
                 return
             
             # 2. Дедупликация
@@ -1155,7 +1152,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             # Прогресс виден в заголовке окна, UI не блокируется.
             self._start_prewarm_thumbnails()
 
-            self.show_snackbar(tr("ready"), ft.Colors.GREEN)
+            self.show_snackbar(tr("ready"), "#81C784")
             
         except asyncio.CancelledError:
             pass
@@ -1163,13 +1160,14 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             import traceback
             traceback.print_exc()
             if self.scanning:
-                self.show_snackbar(tr("error", error=e), ft.Colors.RED)
+                self.show_snackbar(tr("error", error=e), self._WARM_ERROR)
         finally:
             print("Процесс завершён.")
             self.scanning = False
             self.start_scan_btn.content = tr("scan.button.start")
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
-            self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self.start_scan_btn.bgcolor = self._WARM_PRIMARY
+            self.start_scan_btn.color = self._WARM_ON_PRIMARY
             if not (self._prewarm_task is not None and not self._prewarm_task.done()):
                 self._reset_window_progress()
 
@@ -1307,9 +1305,10 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             await self._cancel_scan_workers()
             self.start_scan_btn.content = tr("scan.button.start")
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
-            self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self.start_scan_btn.bgcolor = self._WARM_PRIMARY
+            self.start_scan_btn.color = self._WARM_ON_PRIMARY
             self._reset_window_progress()
-            self.show_snackbar(tr("scan.stopped"), ft.Colors.ORANGE)
+            self.show_snackbar(tr("scan.stopped"), "#FFB74D")
             print("Сканирование остановлено пользователем.")
             return
         
@@ -1320,11 +1319,11 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             # Сканируем все доступные диски
             disks = self._get_available_disks()
             if not disks:
-                self.show_snackbar(tr("scan.no_disks"), ft.Colors.RED)
+                self.show_snackbar(tr("scan.no_disks"), self._WARM_ERROR)
                 return
             scan_paths = disks
         elif not os.path.exists(scan_path):
-            self.show_snackbar(tr("scan.bad_path", path=scan_path), ft.Colors.RED)
+            self.show_snackbar(tr("scan.bad_path", path=scan_path), self._WARM_ERROR)
             return
         else:
             scan_paths = [scan_path]
@@ -1335,7 +1334,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         scanner.STOP_REQUESTED = False
         self.start_scan_btn.content = tr("scan.button.stop")
         self.start_scan_btn.icon = ft.Icons.STOP
-        self.start_scan_btn.bgcolor = ft.Colors.ERROR
+        self.start_scan_btn.bgcolor = self._WARM_ERROR
         self.page.update()
         
         # Показываем прогресс в заголовке окна
@@ -1350,11 +1349,12 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             self.exporting = False
             self.export_button.content = tr("export.button")
             self.export_button.icon = ft.Icons.DOWNLOAD
-            self.export_button.bgcolor = ft.Colors.PRIMARY
+            self.export_button.bgcolor = self._WARM_PRIMARY
+            self.export_button.color = self._WARM_ON_PRIMARY
             if not self.scanning:
                 self._reset_window_progress()
             self.page.update()
-            self.show_snackbar(tr("export.stopped"), ft.Colors.ORANGE)
+            self.show_snackbar(tr("export.stopped"), "#FFB74D")
             print("Экспорт остановлен пользователем.")
             return
         
@@ -1415,7 +1415,8 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             await self._cancel_scan_workers()
             self.start_scan_btn.content = tr("scan.button.start")
             self.start_scan_btn.icon = ft.Icons.PLAY_ARROW
-            self.start_scan_btn.bgcolor = ft.Colors.PRIMARY
+            self.start_scan_btn.bgcolor = self._WARM_PRIMARY
+            self.start_scan_btn.color = self._WARM_ON_PRIMARY
         self._cancel_prewarm()
         self._reset_window_progress()
         
@@ -1462,7 +1463,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         self.tab_content.content = ft.Text(tr("categories.empty"))
         
         self.page.update()
-        self.show_snackbar(tr("reset.done"), ft.Colors.GREEN)
+        self.show_snackbar(tr("reset.done"), "#81C784")
 
     def get_selection_state(self, paths: list) -> str:
         """Определить состояние выделения для иконки чекбокса.
@@ -1516,26 +1517,27 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             content = ft.Column([gallery], expand=True)
         else:
             content = ft.Column(
-                [ft.Text(tr("export.none"), size=14, color=ft.Colors.ON_SURFACE_VARIANT)],
+                [ft.Text(tr("export.none"), size=14, color=self._WARM_ON_SURFACE_VARIANT)],
                 expand=True,
             )
 
         self.tab_content.content = content
         self.page.update()
         # Восстанавливаем позицию скролла при смене вкладки на экспорт
+        page_size = self._calc_grid_size(len(selected_paths))
         self._restore_gallery_scroll(gallery, "export", selected_paths, page_size)
     async def _run_export(self):
         """Экспорт выбранных файлов в одну папку без разделения по категориям"""
         selected_paths = sorted(self.selected_images)
         if not selected_paths:
-            self.show_snackbar(tr("export.none_selected"), ft.Colors.ORANGE)
+            self.show_snackbar(tr("export.none_selected"), "#FFB74D")
             return
         
         self.exporting = True
         self._export_stop_requested = False
         self.export_button.content = tr("export.button.stop")
         self.export_button.icon = ft.Icons.STOP
-        self.export_button.bgcolor = ft.Colors.ERROR
+        self.export_button.bgcolor = self._WARM_ERROR
         
         dest_folder = self.export_dest_folder.value if hasattr(self, 'export_dest_folder') else tr("export.default_folder")
         self._export_dest_folder_path = dest_folder
@@ -1576,11 +1578,12 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             self.exporting = False
             self.export_button.content = tr("export.button")
             self.export_button.icon = ft.Icons.DOWNLOAD
-            self.export_button.bgcolor = ft.Colors.PRIMARY
+            self.export_button.bgcolor = self._WARM_PRIMARY
+            self.export_button.color = self._WARM_ON_PRIMARY
             if not self.scanning:
                 self._reset_window_progress()
             self.page.update()
-            self.show_snackbar(tr("export.copied", count=total_copied, dest=dest_path), ft.Colors.GREEN)
+            self.show_snackbar(tr("export.copied", count=total_copied, dest=dest_path), "#81C784")
 
     def _update_export_progress(self, current: int, total: int, progress: float):
         self._set_window_progress(tr("stage.export"), current, total)
@@ -1658,7 +1661,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         query = self.search_input.value
         
         if not query:
-            self.show_snackbar(tr("search.empty_query"), ft.Colors.ORANGE)
+            self.show_snackbar(tr("search.empty_query"), "#FFB74D")
             return
         
         try:
@@ -1708,10 +1711,10 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 self._restore_gallery_scroll(gallery, "search_results", paths, 100)
         except Exception as e:
             self.search_results_container.controls = [
-                ft.Text(tr("search.error", error=e), size=14, color=ft.Colors.RED),
+                ft.Text(tr("search.error", error=e), size=14, color=self._WARM_ERROR),
             ]
             self.page.update()
-            self.show_snackbar(tr("search.error", error=e), ft.Colors.RED)
+            self.show_snackbar(tr("search.error", error=e), self._WARM_ERROR)
     
     def _get_path_to_cluster_map(self, paths: list = None):
         """Возвращает dict {path: cluster_id} для изображений в кластерах.
@@ -1790,13 +1793,10 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 gapless_playback=True,
             )
         elif placeholder_mode:
-            # Мгновенный показ: серая плитка-плейсхолдер, картинка придёт фоном.
-            # Внутренний Image не нужен — при появлении миниатюры весь элемент
-            # заменяется на реальный (_fill_page_thumbnails).
             image = ft.Container(
                 width=150,
                 height=150,
-                bgcolor=ft.Colors.with_opacity(0.08, ft.Colors.SURFACE_CONTAINER_HIGHEST),
+                bgcolor=ft.Colors.with_opacity(0.08, self._WARM_SURFACE),
             )
         else:
             # Fallback на оригинальный путь
@@ -1820,9 +1820,9 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                         str(display_num),
                         size=10,
                         weight=ft.FontWeight.NORMAL,
-                        color=ft.Colors.with_opacity(0.7, ft.Colors.ON_SURFACE_VARIANT),
+                        color=ft.Colors.with_opacity(0.7, self._WARM_ON_SURFACE_VARIANT),
                     ),
-                    bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.SURFACE_CONTAINER_HIGHEST),
+                    bgcolor=ft.Colors.with_opacity(0.4, self._WARM_SURFACE),
                     padding=ft.Padding(4, 1, 4, 1),
                     border_radius=6,
                 )
@@ -1856,7 +1856,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             content=ft.Container(
                 content=content,
                 border_radius=8,
-                border=ft.Border.all(3, ft.Colors.PRIMARY) if is_selected else None,
+                border=ft.Border.all(3, self._WARM_PRIMARY) if is_selected else None,
                 data=path,  # <-- важно: храним оригинальный путь для поиска контейнера
             ),
             on_tap_down=on_tap_down,
@@ -2355,7 +2355,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 container = control.content if isinstance(control, ft.GestureDetector) else control
                 if isinstance(container, ft.Container) and container.data == path:
                     is_selected = path in self.selected_images
-                    container.border = ft.Border.all(3, ft.Colors.PRIMARY) if is_selected else None
+                    container.border = ft.Border.all(3, self._WARM_PRIMARY) if is_selected else None
                     updated = True
                     break
         
@@ -2391,7 +2391,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         
         self.update_clusters_list()
         
-        self.show_snackbar(tr("selected.files", count=len(self.selected_images)), ft.Colors.BLUE)
+        self.show_snackbar(tr("selected.files", count=len(self.selected_images)), self._WARM_PRIMARY)
         
         # Обновляем статистику выбранных в боковой панели (в фоновом потоке)
         if hasattr(self, 'stat_selected'):
@@ -2640,7 +2640,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         path_text = ft.Text(
             path,
             size=12,
-            color=ft.Colors.with_opacity(0.8, ft.Colors.ON_SURFACE_VARIANT),
+            color=ft.Colors.with_opacity(0.8, self._WARM_ON_SURFACE_VARIANT),
             text_align=ft.TextAlign.CENTER,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
@@ -2723,7 +2723,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         path_text = ft.Text(
             path,
             size=11,
-            color=ft.Colors.with_opacity(0.85, ft.Colors.ON_SURFACE_VARIANT),
+            color=ft.Colors.with_opacity(0.85, self._WARM_ON_SURFACE_VARIANT),
             text_align=ft.TextAlign.CENTER,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,

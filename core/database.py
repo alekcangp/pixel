@@ -1,7 +1,7 @@
 """SQLite-хранилище вместо JSON/npy-файлов.
 
 Схема:
-  images        — отсканированные файлы (path, size, ext, mtime, file_hash, phash)
+  images        — отсканированные файлы (path, size, ext, mtime, phash)
   embeddings    — эмбеддинги (image_id, vector BLOB)
   clusters      — кластеризация (image_id, cluster_id)
   dedup_groups  — группы дубликатов (group_id, image_id, is_canonical)
@@ -48,6 +48,22 @@ def _get_conn():
     return conn
 
 
+def _path_to_id_map(conn, paths):
+    """Возвращает {path: id} одним батч-запросом (устраняет N+1-опрашивание)."""
+    if not paths:
+        return {}
+    ids = {}
+    step = 900  # лимит SQLite на число переменных ~999
+    for i in range(0, len(paths), step):
+        chunk = paths[i:i + step]
+        placeholders = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"SELECT path, id FROM images WHERE path IN ({placeholders})", chunk
+        ).fetchall()
+        ids.update({r["path"]: r["id"] for r in rows})
+    return ids
+
+
 def _init_schema(conn):
     conn.executescript(
         """
@@ -57,7 +73,6 @@ def _init_schema(conn):
             size  INTEGER NOT NULL DEFAULT 0,
             ext   TEXT NOT NULL DEFAULT '',
             mtime REAL NOT NULL DEFAULT 0,
-            file_hash TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT ''
         );
 
@@ -109,8 +124,6 @@ def _init_schema(conn):
     cols = [r[1] for r in conn.execute("PRAGMA table_info(images)").fetchall()]
     if "mtime" not in cols:
         conn.execute("ALTER TABLE images ADD COLUMN mtime REAL NOT NULL DEFAULT 0")
-    if "file_hash" not in cols:
-        conn.execute("ALTER TABLE images ADD COLUMN file_hash TEXT NOT NULL DEFAULT ''")
     if "source" not in cols:
         conn.execute("ALTER TABLE images ADD COLUMN source TEXT NOT NULL DEFAULT ''")
 
@@ -284,8 +297,8 @@ def save_images(files):
         conn.execute("DELETE FROM failed_files")
         conn.execute("DELETE FROM images")
         conn.executemany(
-            "INSERT OR IGNORE INTO images (path, size, ext, mtime, file_hash, source) VALUES (?, ?, ?, ?, ?, ?)",
-            [(f["path"], f.get("size", 0), f.get("ext", ""), f.get("mtime", 0), f.get("file_hash", ""), f.get("source", "")) for f in files],
+            "INSERT OR IGNORE INTO images (path, size, ext, mtime, source) VALUES (?, ?, ?, ?, ?)",
+            [(f["path"], f.get("size", 0), f.get("ext", ""), f.get("mtime", 0), f.get("source", "")) for f in files],
         )
         conn.commit()
     finally:
@@ -293,23 +306,23 @@ def save_images(files):
 
 
 def load_images():
-    """Возвращает список dict [{path, size, ext, mtime, file_hash, source}] в порядке id, или None если таблица пуста."""
+    """Возвращает список dict [{path, size, ext, mtime, source}] в порядке id, или None если таблица пуста."""
     conn = _get_conn()
     try:
-        rows = conn.execute("SELECT path, size, ext, mtime, file_hash, source FROM images ORDER BY id").fetchall()
+        rows = conn.execute("SELECT path, size, ext, mtime, source FROM images ORDER BY id").fetchall()
         if not rows:
             return None
-        return [{"path": r["path"], "size": r["size"], "ext": r["ext"], "mtime": r["mtime"], "file_hash": r["file_hash"], "source": r["source"]} for r in rows]
+        return [{"path": r["path"], "size": r["size"], "ext": r["ext"], "mtime": r["mtime"], "source": r["source"]} for r in rows]
     finally:
         conn.close()
 
 
 def get_existing_images():
-    """Возвращает dict {path: {id, size, ext, mtime, file_hash, source}} для всех изображений в БД."""
+    """Возвращает dict {path: {id, size, ext, mtime, source}} для всех изображений в БД."""
     conn = _get_conn()
     try:
-        rows = conn.execute("SELECT id, path, size, ext, mtime, file_hash, source FROM images").fetchall()
-        return {r["path"]: {"id": r["id"], "size": r["size"], "ext": r["ext"], "mtime": r["mtime"], "file_hash": r["file_hash"], "source": r["source"]} for r in rows}
+        rows = conn.execute("SELECT id, path, size, ext, mtime, source FROM images").fetchall()
+        return {r["path"]: {"id": r["id"], "size": r["size"], "ext": r["ext"], "mtime": r["mtime"], "source": r["source"]} for r in rows}
     finally:
         conn.close()
 
@@ -317,8 +330,8 @@ def get_existing_images():
 def update_images_incremental(new_files, changed_files, removed_paths, source=""):
     """Инкрементальное обновление таблицы images.
 
-    new_files: list[dict] — новые файлы (path, size, ext, mtime, file_hash)
-    changed_files: list[dict] — изменённые файлы (path, size, ext, mtime, file_hash)
+    new_files: list[dict] — новые файлы (path, size, ext, mtime)
+    changed_files: list[dict] — изменённые файлы (path, size, ext, mtime)
     removed_paths: list[str] — пути удалённых файлов (только для текущего источника)
     source: str — источник (путь сканирования)
     """
@@ -334,15 +347,15 @@ def update_images_incremental(new_files, changed_files, removed_paths, source=""
         # Обновляем изменённые файлы
         if changed_files:
             conn.executemany(
-                "UPDATE images SET size = ?, ext = ?, mtime = ?, file_hash = ?, source = ? WHERE path = ?",
-                [(f["size"], f["ext"], f["mtime"], f["file_hash"], source, f["path"]) for f in changed_files],
+                "UPDATE images SET size = ?, ext = ?, mtime = ?, source = ? WHERE path = ?",
+                [(f["size"], f["ext"], f["mtime"], source, f["path"]) for f in changed_files],
             )
 
         # Добавляем новые файлы
         if new_files:
             conn.executemany(
-                "INSERT OR IGNORE INTO images (path, size, ext, mtime, file_hash, source) VALUES (?, ?, ?, ?, ?, ?)",
-                [(f["path"], f.get("size", 0), f.get("ext", ""), f.get("mtime", 0), f.get("file_hash", ""), source) for f in new_files],
+                "INSERT OR IGNORE INTO images (path, size, ext, mtime, source) VALUES (?, ?, ?, ?, ?)",
+                [(f["path"], f.get("size", 0), f.get("ext", ""), f.get("mtime", 0), source) for f in new_files],
             )
 
         conn.commit()
@@ -360,11 +373,12 @@ def save_phashes(hash_map, mtime_map=None):
     try:
         conn.execute("DELETE FROM image_hashes")
         rows = []
+        id_map = _path_to_id_map(conn, list(hash_map.keys()))
         for path, phash in hash_map.items():
-            r = conn.execute("SELECT id FROM images WHERE path = ?", (path,)).fetchone()
-            if r:
+            image_id = id_map.get(path)
+            if image_id is not None:
                 mtime = mtime_map.get(path, 0) if mtime_map else 0
-                rows.append((r["id"], _to_signed(int(phash)), float(mtime)))
+                rows.append((image_id, _to_signed(int(phash)), float(mtime)))
         conn.executemany(
             "INSERT OR REPLACE INTO image_hashes (image_id, phash, mtime) VALUES (?, ?, ?)", rows
         )
@@ -378,11 +392,12 @@ def save_phashes_incremental(hash_map, mtime_map=None):
     conn = _get_conn()
     try:
         rows = []
+        id_map = _path_to_id_map(conn, list(hash_map.keys()))
         for path, phash in hash_map.items():
-            r = conn.execute("SELECT id FROM images WHERE path = ?", (path,)).fetchone()
-            if r:
+            image_id = id_map.get(path)
+            if image_id is not None:
                 mtime = mtime_map.get(path, 0) if mtime_map else 0
-                rows.append((r["id"], _to_signed(int(phash)), float(mtime)))
+                rows.append((image_id, _to_signed(int(phash)), float(mtime)))
         if rows:
             conn.executemany(
                 "INSERT OR REPLACE INTO image_hashes (image_id, phash, mtime) VALUES (?, ?, ?)", rows
@@ -437,12 +452,13 @@ def save_embeddings(vectors, paths, mtime_map=None, incremental=False):
         if not incremental:
             conn.execute("DELETE FROM embeddings")
         rows = []
+        id_map = _path_to_id_map(conn, list(paths))
         for vec, path in zip(vectors, paths):
-            r = conn.execute("SELECT id FROM images WHERE path = ?", (path,)).fetchone()
-            if r:
+            image_id = id_map.get(path)
+            if image_id is not None:
                 blob = np.asarray(vec, dtype=np.float32).tobytes()
                 mtime = mtime_map.get(path, 0) if mtime_map else 0
-                rows.append((r["id"], blob, float(mtime)))
+                rows.append((image_id, blob, float(mtime)))
         conn.executemany(
             "INSERT OR REPLACE INTO embeddings (image_id, vector, mtime) VALUES (?, ?, ?)", rows
         )
@@ -478,7 +494,7 @@ def load_embeddings(exclude_duplicates=True):
         if not rows:
             return None, None
         paths = [r["path"] for r in rows]
-        vectors = np.array([np.frombuffer(r["vector"], dtype=np.float32) for r in rows])
+        vectors = np.frombuffer(b"".join(r["vector"] for r in rows), dtype=np.float32).reshape(len(rows), -1)
         return vectors, paths
     finally:
         conn.close()
@@ -496,7 +512,7 @@ def load_embeddings_with_mtime():
         if not rows:
             return None, None, None
         paths = [r["path"] for r in rows]
-        vectors = np.array([np.frombuffer(r["vector"], dtype=np.float32) for r in rows])
+        vectors = np.frombuffer(b"".join(r["vector"] for r in rows), dtype=np.float32).reshape(len(rows), -1)
         mtime_map = {r["path"]: float(r["mtime"]) for r in rows}
         return vectors, paths, mtime_map
     finally:
@@ -513,16 +529,20 @@ def save_clusters(cluster_dict, cluster_names=None):
     try:
         conn.execute("DELETE FROM clusters")
         rows = []
+        all_paths = []
+        for paths in cluster_dict.values():
+            all_paths.extend(paths)
+        id_map = _path_to_id_map(conn, all_paths)
         for cluster_id, paths in cluster_dict.items():
             # Получаем имя кластера если есть
             name = ""
             if cluster_names and cluster_id in cluster_names:
                 name = cluster_names[cluster_id]
-            
+
             for path in paths:
-                r = conn.execute("SELECT id FROM images WHERE path = ?", (path,)).fetchone()
-                if r:
-                    rows.append((r["id"], int(cluster_id), name))
+                image_id = id_map.get(path)
+                if image_id is not None:
+                    rows.append((image_id, int(cluster_id), name))
         conn.executemany(
             "INSERT OR REPLACE INTO clusters (image_id, cluster_id, name) VALUES (?, ?, ?)", rows
         )

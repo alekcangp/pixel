@@ -1,50 +1,50 @@
 # Pixel
 
-> Pixel — умный локальный сборщик и сортировщик фотографий: находит изображения по всем дискам, убирает дубликаты, группирует снимки по сюжетам с помощью нейросети и даёт быструю галерею для просмотра и отбора.
+> Pixel — a smart local photo collector and organizer: finds images across all drives, removes duplicates, groups shots by subject using a neural network, and provides a fast gallery for browsing and picking the best photos.
 
-Pixel — десктопное приложение (Windows/macOS) на Python + Flet. Работает полностью локально: фотографии никуда не загружаются, из интернета один раз скачивается только AI-модель (SigLIP).
+Pixel is a desktop app (Windows/macOS) built with Python + Flet. It runs fully locally: photos are never uploaded anywhere — the only thing downloaded from the internet (once) is the AI model (SigLIP).
 
-## Возможности
+## Features
 
-- Сканирование всех доступных дисков и поиск фотографий (jpg, jpeg, png, webp, bmp, gif, tiff).
-- Поиск дубликатов и визуально похожих изображений.
-- Автоматическая кластеризация изображений по сюжетам (природа, документы, животные и т.д.) через SigLIP-эмбеддинги + UMAP/HDBSCAN.
-- Семантический поиск по описанию («кот на диване») и поиск похожих фото по образцу (FAISS).
-- Галерея Flet с полноэкранным просмотром, зумом и отбором лучших кадров.
-- Локализация: русский и английский (автоопределение языка ОС).
-- Инкрементальная обработка: база помнит файлы, повторные сканы обрабатывают только новое/изменённое.
+- Scans all available drives to find photos (jpg, jpeg, png, webp, bmp, gif, tiff).
+- Detects duplicates and visually similar images.
+- Automatically clusters images by subject (nature, documents, animals, etc.) via SigLIP embeddings + UMAP/HDBSCAN.
+- Semantic search by description ("cat on the couch") and similar-photo search (FAISS).
+- Flet gallery with fullscreen viewing, zoom, and best-shot selection.
+- Localization: Russian and English (auto-detected from the OS locale).
+- Incremental processing: the database remembers files, so rescan only processes new/changed items.
 
-## Запуск
+## Getting started
 
 - Windows: `pixel.bat`
 - macOS: `pixel.command`
-- CLI / вручную: `python main.py` (команды scan, dedup, clear; тяжёлые зависимости импортируются лениво)
+- CLI / manual: `python main.py` (commands: scan, dedup, clear; heavy dependencies are imported lazily)
 
-При первом запуске автоматически устанавливаются зависимости и скачивается AI-модель. Прогресс сканирования отображается в заголовке окна.
+On first launch, dependencies are installed and the AI model is downloaded automatically. Scan progress is shown in the window title.
 
-## Структура проекта
+## Project structure
 
-- `main.py` — точка входа, CLI-команды (scan, dedup, clear).
-- `app_flet.py` — GUI-приложение на Flet (галерея, полноэкранный просмотр).
-- `config.py` — пути (БД в `storage/images.db`), расширения файлов, исключаемые каталоги, настройки окружения (OMP).
-- `i18n.py` — локализация RU/EN.
+- `main.py` — entry point, CLI commands (scan, dedup, clear).
+- `app_flet.py` — Flet GUI app (gallery, fullscreen viewer).
+- `config.py` — paths (DB at `storage/images.db`), file extensions, excluded directories, environment settings (OMP).
+- `i18n.py` — RU/EN localization.
 - `core/`:
-  - `scanner.py` — обход дисков и сбор файлов изображений.
-  - `database.py` — SQLite-хранилище индекса (`storage/images.db`).
-  - `dedup.py` — обнаружение дубликатов/похожих изображений.
-  - `embedder.py` — вычисление эмбеддингов (SigLIP, torch/transformers).
-  - `clustererhdb.py` — кластеризация эмбеддингов (UMAP + HDBSCAN).
-  - `search.py` — семантический и поиск по похожести (FAISS).
-  - `thumbnail_cache.py` — кэш миниатюр.
+  - `scanner.py` — disk traversal and image file collection.
+  - `database.py` — SQLite index storage (`storage/images.db`).
+  - `dedup.py` — duplicate/similar image detection.
+  - `embedder.py` — embedding computation (SigLIP, torch/transformers).
+  - `clustererhdb.py` — embedding clustering (UMAP + HDBSCAN).
+  - `search.py` — semantic and similarity search (FAISS).
+  - `thumbnail_cache.py` — thumbnail cache.
 - `assets/`, `screenshots/`, `storage/`.
 
-## Технологии
+## Tech stack
 
-Python; torch, transformers (SigLIP), faiss-cpu, umap-learn, hdbscan, scikit-learn, imagehash, pillow, flet (UI), sqlite3 (хранение), tkinter (диалоги выбора папок).
+Python; torch, transformers (SigLIP), faiss-cpu, umap-learn, hdbscan, scikit-learn, imagehash, pillow, flet (UI), sqlite3 (storage), tkinter (folder dialogs).
 
-## Важные особенности
+## Important notes
 
-- Во время сканирования файлы не перемещаются и не удаляются — создаётся только локальный индекс.
-- Минимальный размер файла для индексации задаётся в `config.py` (`MIN_FILE_SIZE`).
-- Список поддерживаемых форматов и исключаемых каталогов настраивается в `config.py`.
-- Репозиторий: https://github.com/alekcangp/pixel
+- During scanning, files are never moved or deleted — only a local index is built.
+- Minimum indexed file size is set in `config.py` (`MIN_FILE_SIZE`).
+- Supported formats and excluded directories are configurable in `config.py`.
+- Repository: https://github.com/alekcangp/pixel

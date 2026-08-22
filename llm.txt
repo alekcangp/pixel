@@ -1,0 +1,49 @@
+# Pixel
+
+> Pixel — a smart local photo collector and organizer: finds images across all drives, removes duplicates, groups shots by subject using a neural network, and provides a fast gallery for browsing and picking the best photos.
+
+Pixel is a desktop app (Windows/macOS) built with Python + Flet. It runs fully locally: photos are never uploaded anywhere — the only thing downloaded from the internet (once) is the AI model (SigLIP).
+
+## Features
+
+- Scans all available drives to find photos (jpg, jpeg, png, webp, bmp, gif, tiff).
+- Detects duplicates and visually similar images.
+- Automatically clusters images by subject (nature, documents, animals, etc.) via SigLIP embeddings + UMAP/HDBSCAN.
+- Semantic search by description ("cat on the couch") and similar-photo search (FAISS).
+- Flet gallery with fullscreen viewing, zoom, and best-shot selection.
+- Localization: Russian and English (auto-detected from the OS locale).
+- Incremental processing: the database remembers files, so rescan only processes new/changed items.
+
+## Getting started
+
+- Windows: `pixel.bat`
+- macOS: `pixel.command`
+- CLI / manual: `python main.py` (commands: scan, dedup, clear; heavy dependencies are imported lazily)
+
+On first launch, dependencies are installed and the AI model is downloaded automatically. Scan progress is shown in the window title.
+
+## Project structure
+
+- `main.py` — entry point, CLI commands (scan, dedup, clear).
+- `app_flet.py` — Flet GUI app (gallery, fullscreen viewer).
+- `config.py` — paths (DB at `storage/images.db`), file extensions, excluded directories, environment settings (OMP).
+- `i18n.py` — RU/EN localization.
+- `core/`:
+  - `scanner.py` — disk traversal and image file collection.
+  - `database.py` — SQLite index storage (`storage/images.db`).
+  - `dedup.py` — duplicate/similar image detection.
+  - `embedder.py` — embedding computation (SigLIP, torch/transformers).
+  - `clustererhdb.py` — embedding clustering (UMAP + HDBSCAN).
+  - `search.py` — semantic and similarity search (FAISS).
+  - `thumbnail_cache.py` — thumbnail cache.
+- `assets/`, `screenshots/`, `storage/`.
+
+## Tech stack
+
+Python; torch, transformers (SigLIP), faiss-cpu, umap-learn, hdbscan, scikit-learn, imagehash, pillow, flet (UI), sqlite3 (storage), tkinter (folder dialogs).
+
+## Important notes
+
+- During scanning, files are never moved or deleted — only a local index is built.
+- Supported formats and excluded directories are configurable in `config.py`.
+- Repository: https://github.com/alekcangp/pixel

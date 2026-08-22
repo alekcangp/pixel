@@ -371,18 +371,28 @@ def find_similar_images(files, max_workers=None, progress_callback=None, existin
 
 
 def _pick_canonical(paths):
-    """Выбирает «эталонный» файл группы: с самым ранним mtime (оригинал).
+    """Выбирает «эталонный» файл группы: наибольшее разрешение (width*height).
 
-    Оригинал обычно старше дубликатов, поэтому выбираем минимальный mtime.
-    При равенстве — наибольший размер файла. Не требует декодирования
-    изображений, что в десятки раз быстрее предыдущего варианта с
-    разрешением через OpenCV.
+    Если разрешения совпадают — более старый файл (минимальный mtime).
+    Размеры берутся из кэша БД (`images.width/height`), чтобы не декодировать
+    изображения. При отсутствии данных в БД используется фолбэк на mtime
+    и размер файла на диске.
     """
-    return min(
-        paths,
-        key=lambda p: (os.path.getmtime(p) if os.path.exists(p) else float('inf'),
-                       -(os.path.getsize(p) if os.path.exists(p) else 0)),
-    )
+    def _sort_key(p):
+        area = 0
+        try:
+            dims = database.get_image_size(p)
+            if dims:
+                area = int(dims[0]) * int(dims[1])
+        except Exception:
+            area = -1
+        mtime = os.path.getmtime(p) if os.path.exists(p) else float('inf')
+        return (-area, mtime)
+
+    try:
+        return min(paths, key=_sort_key)
+    except ValueError:
+        return paths[0]
 
 
 def _safe_move(src, dst_dir):

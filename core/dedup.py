@@ -73,6 +73,10 @@ def compute_phash(path):
     try:
         import imagehash
         img = Image.open(path)
+        try:
+            database.update_image_size(path, img.width, img.height)
+        except Exception:
+            pass
         return _bits_to_int(imagehash.phash(img).hash)
     except Exception:
         return None

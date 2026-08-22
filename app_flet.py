@@ -197,12 +197,8 @@ class ImageDedupApp:
         
         # Глобальные клавиатурные сокращения для превью
         self.page.on_keyboard_event = self._on_preview_keyboard
-        
-        # 2. Однократный вывод уже полностью готового интерфейса нужного размера.
-        #    Само окно показывается и центрируется задачей _open_window, чтобы
-        #    не мелькнуть в углу и открыться ровно по центру экрана.
         self.page.update()
-    
+
     def _pick_folder(self, title: str) -> str | None:
         """Открывает нативный диалог выбора папки через tkinter."""
         root = tk.Tk()
@@ -940,8 +936,16 @@ class ImageDedupApp:
             
             # Обновить список категорий в боковой панели
             self.update_clusters_list()
-            
+
             self.page.update()
+
+            # Если это обычный старт без активного сканирования/других стадий,
+            # проверяем миниатюры и догенерируем недостающие.
+            try:
+                if not self.scanning and getattr(self, '_scan_phase', 'idle') == 'idle' and stats.get('total', 0) > 0:
+                    await self.ensure_thumbnails()
+            except Exception as e:
+                print(f"Ошибка проверки миниатюр: {e}")
         except Exception as e:
             print(f"Ошибка загрузки статистики: {e}")
 
@@ -1316,6 +1320,59 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         self._prewarm_task = None
         if task is not None and not task.done():
             task.cancel()
+
+    async def ensure_thumbnails(self):
+        """Проверяет миниатюры при старте и догенерирует недостающие.
+
+        Прогресс показывается в заголовке окна. Не перезаписывает заголовок,
+        если там уже активна другая стадия.
+        """
+        total = await asyncio.to_thread(database.count_missing_thumbnails)
+        if total <= 0:
+            return
+
+        done = 0
+        last_update = time.monotonic()
+        title_owner = True
+        setattr(self.page.session, "gallery_prewarm_active", True)
+        try:
+            self._set_window_progress(tr("stage.thumbs"), 0, total, key="prewarm")
+        except Exception:
+            pass
+        try:
+            while done < total:
+                try:
+                    if self._win_progress_key != "prewarm":
+                        break
+                except Exception:
+                    break
+                batch = await asyncio.to_thread(database.missing_thumbnail_paths, limit=config.PREWARM_CHUNK_SIZE)
+                if not batch:
+                    break
+                await self._generate_thumbnails_parallel(batch, 150, max_workers=config.PREWARM_THUMB_WORKERS)
+                done += len(batch)
+                now = time.monotonic()
+                if now - last_update >= 0.15:
+                    last_update = now
+                    try:
+                        self._set_window_progress(tr("stage.thumbs"), done, total, key="prewarm")
+                    except Exception:
+                        pass
+        finally:
+            setattr(self.page.session, "gallery_prewarm_active", False)
+            if title_owner and getattr(self, '_win_progress_key', None) == "prewarm":
+                title_owner = False
+                try:
+                    self._reset_window_progress()
+                except Exception:
+                    pass
+        if getattr(self, '_win_progress_key', None) == "prewarm":
+            try:
+                await asyncio.sleep(0.4)
+                if getattr(self, '_win_progress_key', None) == "prewarm":
+                    self._reset_window_progress()
+            except Exception:
+                pass
 
     async def _prewarm_thumbnails(self):
         """Фоновая генерация миниатюр для всех файлов кластеров.
@@ -1938,9 +1995,14 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         """
         is_selected = path in self.selected_images
         
-        # Используем предварительно сгенерированную миниатюру, либо генерируем на лету
+        # Используем предварительно сгенерированную миниатюру.
+        # ВАЖНО: никакой синхронной генерации здесь быть не должно — этот метод
+        # вызывается из UI-потока (load_more/_fill_page_thumbnails), и PIL-декод
+        # оригинала на 50–150 мс за фото блокирует интерфейс. Отсутствующие
+        # миниатюры всегда догружаются фоном через _fill_page_thumbnails/
+        # _generate_thumbnails_parallel, а здесь просто рисуем плейсхолдер.
         if thumb_data is None and not placeholder_mode:
-            thumb_data = thumbnail_cache.get_thumbnail(path, size=150)
+            placeholder_mode = True
         if thumb_data is not None:
             image = ft.Image(
                 src=thumb_data,
@@ -1952,21 +2014,27 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 gapless_playback=True,
             )
         elif placeholder_mode:
-            image = ft.Container(
+            # Плейсхолдер — Container с возможностью показа фото через .image.
+            # ВАЖНО: НЕ заменяем этот контрол в галерее позже. Замена
+            # gallery.controls[i] меняет список детей GridView, и клиент видит
+            # её только после полного обновления родителя (клик). Вместо этого
+            # _fill_page_thumbnails присваивает holder.image = DecorationImage(...)
+            # и патчит один этот контрол — список не трогается, миниатюра
+            # появляется сразу.
+            holder = ft.Container(
                 width=150,
                 height=150,
                 bgcolor=ft.Colors.with_opacity(0.08, self._WARM_SURFACE),
             )
+            image = holder
         else:
-            # Fallback на оригинальный путь
-            image = ft.Image(
-                src=path,
-                fit="contain",
+            # Fallback: плейсхолдер вместо загрузки оригинала.
+            # Раньше здесь был src=path (полное декодирование JPEG 3648×2736
+            # ради плитки 150×150) — это давало секунды фриза при скролле.
+            image = ft.Container(
                 width=150,
                 height=150,
-                cache_width=150,
-                cache_height=150,
-                gapless_playback=True,
+                bgcolor=ft.Colors.with_opacity(0.08, self._WARM_SURFACE),
             )
         
         # Для поиска показываем номер категории в углу
@@ -2011,7 +2079,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         def on_secondary_tap(e):
             self.show_preview(path)
         
-        return ft.GestureDetector(
+        gesture = ft.GestureDetector(
             content=ft.Container(
                 content=content,
                 border_radius=8,
@@ -2021,6 +2089,12 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             on_tap_down=on_tap_down,
             on_secondary_tap=on_secondary_tap,
         )
+
+        # Для плейсхолдера запоминаем "держатель" изображения, чтобы
+        # _fill_page_thumbnails мог подставить миниатюру, не заменяя контрол.
+        if placeholder_mode:
+            gesture._thumb_holder = image
+        return gesture
 
     def _make_loading_indicator(self) -> ft.Container:
         """Индикатор загрузки в конце галереи (пока подгружаются следующие фото).
@@ -2127,13 +2201,28 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         if not paths:
             return {}
 
-        # 1) Актуальные метаданные файлов (бюджетный os.stat в одном потоке).
+        # 1) Метаданные файлов. os.stat кэшируется: одни и те же файлы статятся
+        # на КАЖДОЙ странице галереи, а на macOS stat может внезапно блокироваться
+        # (Spotlight, iCloud, сброс кэша inode) — в логах до 5 с на 30 файлов.
+        # mtime/size не меняются между страницами, поэтому TTL-кэш безопасен:
+        # устаревшая запись максимум META_TTL секунд приведёт лишь к лишней
+        # перегенерации миниатюры позже.
+        now_ts = __import__('time').monotonic()
+        cache = getattr(self, "_meta_cache", None)
+        if cache is None:
+            cache = self._meta_cache = {}
+
         def _collect_meta():
             meta = {}
             for p in paths:
+                hit = cache.get(p)
+                if hit is not None and now_ts - hit[2] < config.META_CACHE_TTL:
+                    meta[p] = (hit[0], hit[1])
+                    continue
                 try:
                     st = os.stat(p)
                     meta[p] = (st.st_mtime, st.st_size)
+                    cache[p] = (st.st_mtime, st.st_size, __import__('time').monotonic())
                 except OSError:
                     meta[p] = None
             return meta
@@ -2160,7 +2249,8 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
 
             async def generate_one(path):
                 async with semaphore:
-                    return path, await asyncio.to_thread(thumbnail_cache.get_thumbnail, path, size)
+                    blob = await asyncio.to_thread(thumbnail_cache.get_thumbnail, path, size)
+                    return path, blob
 
             generated = await asyncio.gather(*[generate_one(p) for p in missing])
             result.update(dict(generated))
@@ -2196,7 +2286,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                     return
                 for idx in range(0, len(paths), 100):
                     batch = paths[idx:idx + 100]
-                    await self._generate_thumbnails_parallel(batch, 150, max_workers=12)
+                    await self._generate_thumbnails_parallel(batch, 150, max_workers=config.PREWARM_THUMB_WORKERS)
             except Exception:
                 import traceback
                 traceback.print_exc()
@@ -2242,6 +2332,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         session_key = f"gallery_offset_{scope}"
         setattr(self.page.session, session_key, 0)
         setattr(self.page.session, f"gallery_loading_{scope}", False)
+        setattr(self.page.session, f"gallery_filling_{scope}", False)
 
         # Динамический page_size: заполняем видимую область окна целиком
         # (с запасом ×3, чтобы следующая порция была готова заранее)
@@ -2287,12 +2378,9 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         if offset + len(page_paths) < len(paths):
             gallery.controls.append(self._make_loading_indicator())
 
-        # Фоновая подстановка миниатюр на место плейсхолдеров первого экрана
-        # + прогрев кэша миниатюр для следующих страниц галереи.
-        # Важно: вставка всех элементов в GridView запрещена, иначе
-        # lazy loading перестаёт быть lazy loading и UI утяжеляется.
+        # Фоновая подстановка миниатюр на место плейсхолдеров первого экрана.
+        # Дальнейшие миниатюры подгружаются лениво при скролле.
         asyncio.create_task(self._fill_page_thumbnails(page_paths, gallery, scope))
-        self._preload_gallery_cache(paths, scope)
 
         return gallery
 
@@ -2305,21 +2393,34 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         """
         if not page_paths or gallery is None:
             return
+        filling_key = f"gallery_filling_{scope}"
+        setattr(self.page.session, filling_key, True)
         try:
             thumbs = await self._generate_thumbnails_parallel(page_paths, 150, max_workers=max_workers)
-            path_to_cluster = self._gallery_path_to_cluster if scope == "search_results" else None
-            replaced = False
+            # path_to_cluster не нужен: патчим только существующий плейсхолдер
+            pending = []
             for i, path in enumerate(page_paths):
                 thumb = thumbs.get(path)
                 if thumb is None:
                     continue
-                gallery.controls[i] = self._make_gallery_item(path, scope, gallery, path_to_cluster, thumb)
-                replaced = True
-            if replaced:
-                self.page.update()
+                gesture = gallery.controls[i] if i < len(gallery.controls) else None
+                holder = getattr(gesture, "_thumb_holder", None)
+                if holder is None:
+                    continue
+                # Подставляем фото в СУЩЕСТВУЮЩИЙ контрол, не заменяя его в списке.
+                # Так не меняется список детей GridView → клиент видит миниатюру
+                # сразу (иначе — только после полного обновления родителя/клика).
+                holder.image = ft.DecorationImage(src=thumb, fit="contain")
+                holder.bgcolor = None
+                pending.append(gesture)
+            if pending:
+                # Патчим только изменённые контролы — O(порция), список не трогаем
+                self.page.update(*pending)
         except Exception:
             import traceback
             traceback.print_exc()
+        finally:
+            setattr(self.page.session, filling_key, False)
     
     def create_scroll_handler(self, paths: list, scope: str, page_size: int, gallery: ft.GridView):
         """Создать обработчик скролла для lazy loading (инкрементальная автозагрузка).
@@ -2329,9 +2430,34 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         конца меньше примерно одной порции плюс запас для плавности.
         """
         loading_key = f"gallery_loading_{scope}"
+        filling_key = f"gallery_filling_{scope}"
+        # Троттлинг: GridView генерирует десятки ScrollEvent в секунду.
+        # Каждый event — отдельная задача в event-loop; без троттлинга они
+        # накапливаются и блокируют loop на секунды во время прокрутки.
+        throttle_state = {"last": 0.0}
 
         def on_scroll(e: ft.ScrollEvent):
+            # КЛЮЧЕВЫЕ ФИКС: Flet после КАЖДОГО обработанного события вызывает
+            # автообновление ближайшего изолированного предка — у нас GridView
+            # не изолирован, поэтому диффится вся Page (Page id=1 took 65–110 ms
+            # на каждое срабатывание; события скролла идут десятками в секунду →
+            # event-loop работает вхолостую). Отключаем автообновление для хендлера:
+            # страницу/галерею мы патчим сами (patch_control новых контролов).
             try:
+                ft.context.disable_auto_update()
+            except Exception:
+                pass
+            try:
+                import time as _time
+                now = _time.monotonic()
+                if now - throttle_state["last"] < 0.15:
+                    return
+                throttle_state["last"] = now
+                # Пока идёт первичная заливка первого экрана (_fill_page_thumbnails),
+                # скролл-подгрузку не стартуем: две тяжёлые задачи одновременно
+                # конкурируют за event-loop и дают фризы интерфейса.
+                if getattr(self.page.session, filling_key, False):
+                    return
                 max_scroll = getattr(e, 'max_scroll_extent', 0) or 0
                 pixels = getattr(e, 'pixels', 0) or 0
                 if max_scroll <= 0:
@@ -2342,10 +2468,11 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 # но при resize окна он устаревает, поэтому пересчитываем.
                 dynamic_page_size = self._calc_grid_size(len(paths))
                 prefetch_items = self._calc_lazy_window(len(paths))
-                # Порог пикселей: одна страница видимых элементов плюс
-                # запас примерно в 2/3 новой страницы. Слишком мало — подгрузка
-                # начнётся сразу; слишком много — будет ощущение задержки.
-                prefetch_px = max(dynamic_page_size * 150, 600)
+                # Ранний prefetch: стартуем за ~2 страницы до конца списка,
+                # чтобы следующая порция была готова ДО того, как пользователь
+                # докрутит до спиннера (блобы из БД читаются за мс, генерация
+                # отсутствующих идёт в фоне).
+                prefetch_px = max(dynamic_page_size * 150 * 2, 1200)
                 remaining = max_scroll - pixels
 
                 # Если пользователь ещё находится далеко от нижней границы,
@@ -2455,24 +2582,21 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             if indicator_idx is None:
                 indicator_idx = len(gallery.controls)
 
-            # Делаем вставку пачками, чтобы UI-поток не получил "удар" большим
-            # количеством новых контролов за один тик. Это критично для Flet.
-            lazy_batch_size = max(1, min(12, len(page_paths)))
-            for block_start in range(0, len(page_paths), lazy_batch_size):
-                block = page_paths[block_start:block_start + lazy_batch_size]
-                insert_at = indicator_idx
-                for path in block:
-                    gallery.controls.insert(
-                        insert_at,
-                        self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path)),
-                    )
-                    insert_at += 1
+            # ВАЖНО (производительность): gallery.update()/page.update() без
+            # аргументов вычисляют дифф рекурсивно по всему поддереву GridView —
+            # O(все загруженные элементы) на каждый чанк. На глубоком скролле
+            # это секунды Python-CPU в event-loop. Поэтому патчим ТОЛЬКО новые
+            # контролы через page.update(*new_items) — O(порция), константа на
+            # любой глубине.
+            new_items = []
+            insert_at = indicator_idx
+            for path in page_paths:
+                item = self._make_gallery_item(path, scope, gallery, path_to_cluster, thumbs.get(path))
+                gallery.controls.insert(insert_at, item)
+                new_items.append(item)
+                insert_at += 1
 
-                # Небольшой yield нужен, чтобы страницу успевали перерисовать
-                # между блоками; мы не держим поток заблокированным длительное время.
-                await asyncio.sleep(0)
-                self.page.update()
-
+            self.page.update(*new_items)
             # Обновляем offset строго по фактически загруженному количеству.
             loaded_count = len(page_paths)
             new_offset = offset + loaded_count
@@ -2485,8 +2609,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
                 idx = self._find_loading_indicator(gallery)
                 if idx is not None:
                     gallery.controls.pop(idx)
-
-            self.page.update()
+                    gallery.update()
         except Exception as ex:
             print(f"Load more error: {ex}")
             import traceback
@@ -2585,11 +2708,27 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         self._preview_current_path = None
 
     def _get_image_size(self, path: str):
-        """Возвращает (width, height) изображения или None."""
+        """Возвращает (width, height) изображения или None.
+
+        Сначала читает размер из БД, чтобы не открывать файл на каждом
+        вызове preview. Если в БД нет — делает fallback на PIL и сохраняет
+        размер обратно в БД для последующих открытий.
+        """
+        try:
+            size = database.get_image_size(path)
+            if size:
+                return size
+        except Exception:
+            pass
         try:
             from PIL import Image as PILImage
             with PILImage.open(path) as img:
-                return img.size
+                w, h = img.size
+                try:
+                    database.update_image_size(path, w, h)
+                except Exception:
+                    pass
+                return w, h
         except Exception:
             return None
 

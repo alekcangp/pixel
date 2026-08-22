@@ -73,7 +73,9 @@ def _init_schema(conn):
             size  INTEGER NOT NULL DEFAULT 0,
             ext   TEXT NOT NULL DEFAULT '',
             mtime REAL NOT NULL DEFAULT 0,
-            source TEXT NOT NULL DEFAULT ''
+            source TEXT NOT NULL DEFAULT '',
+            width INTEGER NOT NULL DEFAULT 0,
+            height INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS image_hashes (
@@ -323,6 +325,71 @@ def get_existing_images():
     try:
         rows = conn.execute("SELECT id, path, size, ext, mtime, source FROM images").fetchall()
         return {r["path"]: {"id": r["id"], "size": r["size"], "ext": r["ext"], "mtime": r["mtime"], "source": r["source"]} for r in rows}
+    finally:
+        conn.close()
+
+
+def update_image_size(path: str, width: int, height: int) -> None:
+    """Сохраняет размер изображения в таблице images."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE images SET width = ?, height = ? WHERE path = ?",
+            (int(width), int(height), path),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_image_size(path: str):
+    """Возвращает (width, height) из images или None."""
+    conn = _get_conn()
+    try:
+        row = conn.execute("SELECT width, height FROM images WHERE path = ?", (path,)).fetchone()
+        if row and row["width"] and row["height"]:
+            return int(row["width"]), int(row["height"])
+        return None
+    finally:
+        conn.close()
+
+
+def count_missing_thumbnails() -> int:
+    """Возвращает количество изображений без актуальной миниатюры."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM images i
+            LEFT JOIN thumbnails t ON i.path = t.path
+               AND t.mtime = i.mtime
+               AND t.size = i.size
+            WHERE i.path IS NOT NULL AND t.path IS NULL
+            """
+        ).fetchone()
+        return int(row["cnt"]) if row else 0
+    finally:
+        conn.close()
+
+
+def missing_thumbnail_paths(limit: int = None):
+    """Возвращает список путей без актуальной миниатюры."""
+    query = """
+        SELECT i.path
+        FROM images i
+        LEFT JOIN thumbnails t ON i.path = t.path
+           AND t.mtime = i.mtime
+           AND t.size = i.size
+        WHERE i.path IS NOT NULL AND t.path IS NULL
+    """
+    args = []
+    if limit is not None:
+        query += " LIMIT ?"
+        args.append(int(limit))
+    conn = _get_conn()
+    try:
+        return [r["path"] for r in conn.execute(query, args).fetchall()]
     finally:
         conn.close()
 

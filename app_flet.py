@@ -2859,7 +2859,11 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         if self._preview_path_text is not None:
             self._preview_path_text.value = new_path
             self._preview_path_text.tooltip = new_path
-        self.page.update()
+            self._preview_path_text.update()
+        if self._preview_image_container is not None:
+            self._preview_image_container.update()
+        if self._preview_image is not None:
+            self._preview_image.update()
 
     def _zoom_preview(self, factor, cx=None, cy=None):
         if cx is None:
@@ -2877,7 +2881,11 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         self._preview_image.height = self._preview_base_h * new_scale
         self._preview_image_container.left = self._preview_pan_x
         self._preview_image_container.top = self._preview_pan_y
-        self.page.update()
+        now = time.perf_counter()
+        if now - getattr(self, "_preview_last_zoom_update", 0.0) >= 0.016:
+            self._preview_last_zoom_update = now
+            self._preview_image.update()
+            self._preview_image_container.update()
 
     def _reset_preview_zoom(self):
         self._preview_scale = 1.0
@@ -2887,7 +2895,8 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         self._preview_image.height = self._preview_base_h
         self._preview_image_container.left = 0
         self._preview_image_container.top = 0
-        self.page.update()
+        self._preview_image.update()
+        self._preview_image_container.update()
 
     def _on_preview_keyboard(self, e: ft.KeyboardEvent):
         dlg = self._preview_dialog
@@ -2992,7 +3001,7 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             self._preview_pan_y += dy
             image_container.left = self._preview_pan_x
             image_container.top = self._preview_pan_y
-            self.page.update()
+            image_container.update()
 
         def on_pan_end(e):
             self._preview_panning = False

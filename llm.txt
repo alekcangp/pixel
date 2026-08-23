@@ -6,7 +6,7 @@ Pixel is a desktop app (Windows/macOS) built with Python + Flet. It runs fully l
 
 ## Features
 
-- Scans all available drives to find photos (jpg, jpeg, png, webp, bmp, gif, tiff).
+- Scans all available drives to find photos (jpg, jpeg, png, webp, heic, heif; HEIC/HEIF via pillow-heif).
 - Detects duplicates and visually similar images.
 - Automatically clusters images by subject (nature, documents, animals, etc.) via SigLIP embeddings + UMAP/HDBSCAN.
 - Semantic search by description ("cat on the couch") and similar-photo search (FAISS).

@@ -18,6 +18,7 @@ All that's left for you is to quickly review the result and pick the best shots.
 - 👀 **Fast visual review** — a convenient gallery for browsing and picking the best frames.
 - 🔍 **Search** — semantic search by description ("cat on the couch") and search for similar images using an example photo.
 - 🌐 **Interface in English and Russian** — the language is selected automatically based on system settings.
+- 📱 **Popular formats supported** — JPEG, PNG, WebP, and HEIC/HEIF (iPhone photos).
 
 ---
 

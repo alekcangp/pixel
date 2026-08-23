@@ -1,11 +1,12 @@
-torch==2.13.0
+torch==2.2.2
 transformers==4.57.6
 pillow==12.3.0
+pillow-heif==1.1.0
 imagehash==4.3.2
 scikit-learn==1.9.0
 faiss-cpu==1.15.0
 numpy==1.26.4
-scipy==1.13.1
+scipy==1.15.3
 flet==0.86.5
 umap-learn==0.5.12
 hdbscan==0.8.44

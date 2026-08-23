@@ -11,7 +11,14 @@ DB_FILE = os.path.join(STORAGE_DIR, "images.db")
 APP_LANGUAGE = "auto"
 
 # Scanning
-DEFAULT_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff"]
+# Поддержка HEIC/HEIF (iPhone): регистрируем pillow-heif, если он установлен.
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
+
+DEFAULT_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "heic", "heif"]
 
 # Minimum file size in bytes.
 # Files smaller than this value are skipped.
@@ -178,7 +185,7 @@ NOISE_RESCUE_THRESHOLD = 0.15
 NOISE_RESCUE_MAX_DIST = 0.5
 
 # Semantic search
-SEARCH_TOP_K = 500
+SEARCH_TOP_K = 1000
 SEARCH_THRESHOLD = 0.05
 
 

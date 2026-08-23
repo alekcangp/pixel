@@ -941,8 +941,13 @@ class ImageDedupApp:
 
             # Если это обычный старт без активного сканирования/других стадий,
             # проверяем миниатюры и догенерируем недостающие.
+            # ВАЖНО: если дедупликация ещё не завершена (есть файлы без pHash),
+            # миниатюры не генерируем — иначе они будут созданы и для
+            # дубликатов, которые после дедупликации будут отфильтрованы.
             try:
-                if not self.scanning and getattr(self, '_scan_phase', 'idle') == 'idle' and stats.get('total', 0) > 0:
+                dedup_pending = await asyncio.to_thread(database.has_pending_dedup)
+                if (not self.scanning and getattr(self, '_scan_phase', 'idle') == 'idle'
+                        and stats.get('total', 0) > 0 and not dedup_pending):
                     await self.ensure_thumbnails()
             except Exception as e:
                 print(f"Ошибка проверки миниатюр: {e}")
@@ -1325,10 +1330,24 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         """Проверяет миниатюры при старте и догенерирует недостающие.
 
         Прогресс показывается в заголовке окна. Не перезаписывает заголовок,
-        если там уже активна другая стадия.
+        если там уже активна другая стадия. Не запускается, если дедупликация
+        ещё не завершена (has_pending_dedup) — иначе миниатюры были бы созданы
+        и для дубликатов, которые будут отфильтрованы.
         """
         total = await asyncio.to_thread(database.count_missing_thumbnails)
         if total <= 0:
+            return
+
+        # Пока мы считали миниатюры в фоне, могла начаться дедупликация —
+        # тогда генерацию откладываем до её завершения.
+        if await asyncio.to_thread(database.has_pending_dedup):
+            return
+
+        # Защита от гонки: пока мы считали миниатюры в фоне, мог начаться
+        # скан/дедупликация или заголовок мог занять другая стадия.
+        # В этом случае не трогаем заголовок вовсе, иначе он «перескочит»
+        # на «Миниатюры...» посреди другой стадии (напр. «Дедупликация...»).
+        if getattr(self, '_win_progress_key', None) not in (None, "prewarm") or self.scanning or getattr(self, '_scan_phase', 'idle') != 'idle':
             return
 
         done = 0
@@ -1523,6 +1542,13 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
         scanner.STOP_REQUESTED = False
         self._scan_phase = "scan"
 
+        # Сразу меняем состояние кнопки, чтобы UI отреагировал мгновенно,
+        # а не после долгого предподсчёта файлов на диске.
+        self.start_scan_btn.content = tr("scan.button.stop")
+        self.start_scan_btn.icon = ft.Icons.STOP
+        self.start_scan_btn.bgcolor = self._WARM_ERROR
+        self.page.update()
+
         if len(scan_paths) > 1:
             self._set_window_progress(tr("progress.prepare"), key="scan")
             def _pre_count():
@@ -1546,11 +1572,6 @@ page.update() в Flet НЕ потокобезопасен — на Windows вы�
             self._global_scan_total = disk_total
             self._per_disk_totals = {scan_paths[0]: disk_total}
 
-        self.start_scan_btn.content = tr("scan.button.stop")
-        self.start_scan_btn.icon = ft.Icons.STOP
-        self.start_scan_btn.bgcolor = self._WARM_ERROR
-        self.page.update()
-        
         # Показываем прогресс в заголовке окна
         self._set_window_progress(tr("stage.scan"), key="scan")
         

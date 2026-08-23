@@ -129,7 +129,14 @@ core/
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate              # Windows: .venv\Scripts\activate
+
+# Linux / macOS:
+source .venv/bin/activate
+# Windows (PowerShell):
+.\.venv\Scripts\Activate.ps1
+# Windows (cmd):
+.venv\Scripts\activate.bat
+
 pip install -r requirements.txt
 ```
 

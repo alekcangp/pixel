@@ -131,9 +131,19 @@ Pipeline: **scan → dedup → embed → cluster**, then browsing/search in the 
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate              # Windows: .venv\Scripts\activate
+
+# Linux / macOS:
+source .venv/bin/activate
+# Windows (PowerShell):
+.\.venv\Scripts\Activate.ps1
+# Windows (cmd):
+.venv\Scripts\activate.bat
+
 pip install -r requirements.txt
 ```
+
+> 💡 If PowerShell blocks script execution, run this once:
+> `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
 
 The SigLIP model is downloaded by the launcher during installation (or automatically on first use of the embedder if installed manually). Cache location: `~/.cache/huggingface/hub/` (Windows: `%USERPROFILE%\.cache\huggingface\hub`).
 
